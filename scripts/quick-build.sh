@@ -7,6 +7,9 @@
 #   build/duckdb-cli/duckdb -unsigned
 #   D LOAD 'build/release/extension/malloy/malloy.duckdb_extension';
 #
+# On macOS the LOAD path must be absolute (the official CLI is hardened and
+# dyld rejects relative paths), so the hint printed at the end uses one.
+#
 # Needs cmake, ninja, a C/C++ compiler, curl and unzip.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -36,4 +39,4 @@ fi
 echo
 echo "Built build/release/extension/malloy/malloy.duckdb_extension for DuckDB $VERSION. Try:"
 echo "  build/duckdb-cli/duckdb -unsigned"
-echo "  D LOAD 'build/release/extension/malloy/malloy.duckdb_extension';"
+echo "  D LOAD '$ROOT/build/release/extension/malloy/malloy.duckdb_extension';"

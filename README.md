@@ -146,6 +146,12 @@ build/duckdb-cli/duckdb -unsigned
 LOAD 'build/release/extension/malloy/malloy.duckdb_extension';
 ```
 
+On macOS, give `LOAD` an absolute path, e.g.
+`LOAD '/path/to/malloy-duckkdb/build/release/extension/malloy/malloy.duckdb_extension';`.
+The official CLI is a hardened binary, and macOS refuses to `dlopen` a
+relative path from one ("relative path not allowed in hardened program").
+`scripts/quick-build.sh` prints the absolute path to use.
+
 `-unsigned` is needed because the build isn't signed by DuckDB. The
 extension only loads into the exact DuckDB version it was built against
 (v1.5.6, the `duckdb` submodule).
