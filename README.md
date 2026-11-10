@@ -4,7 +4,7 @@ A DuckDB extension that lets you query with [Malloy](https://www.malloydata.dev)
 instead of SQL. Malloy compiles to DuckDB SQL inside the extension, and DuckDB
 runs the result, so Malloy queries compose with ordinary SQL.
 
-> **Status: early prototype.** See [Status](#status) below.
+> **Status: early prototype.** Works on Linux against DuckDB v1.5.6; see [Status](#status).
 
 ```sql
 LOAD malloy;
@@ -71,34 +71,57 @@ gets an error explaining how to enable it.
 
 ## Status
 
-- Written against DuckDB v1.5.6. The first builds and test runs are on
-  GitHub Actions; a local build of DuckDB and QuickJS has not been run.
-- Known gaps:
-  - Timestamp literals and timezones (`@2003-01-15`, `timezone:`) don't
-    compile yet: Malloy uses `luxon`, which needs `Intl`, and QuickJS has none.
-  - `STRUCT` and `LIST` columns come through as SQL-native types, so Malloy's
-    nested-data features don't apply to them yet.
-  - Every query re-reads the model and re-describes its tables; nothing is
-    cached yet.
-  - Only `run:` statements are recognized as bare Malloy.
-- CI builds `linux_amd64` and `osx_arm64` only, for now.
+Early prototype. Built and tested on Linux x86-64 against the official
+DuckDB v1.5.6 CLI; macOS and other platforms not yet tried.
+
+Compile speed in QuickJS, on 4 cores with the two-file flights model:
+
+| | Time |
+|---|---|
+| First compile in a process (creates the JS runtime, loads the 2.2 MB bundle) | ~2.2 s |
+| Each compile after that | 50–75 ms |
+
+Known gaps:
+
+- Timestamp literals and timezones (`@2003-01-15`, `timezone:`) don't
+  compile yet: Malloy uses `luxon`, which needs `Intl`, and QuickJS has none.
+- `STRUCT` and `LIST` columns come through as SQL-native types, so Malloy's
+  nested-data features don't apply to them yet.
+- Every query re-reads the model and re-describes its tables; nothing is
+  cached yet.
+- Only `run:` statements are recognized as bare Malloy.
+- A bare `run:` in the same script as the `LOAD malloy` that enables it
+  (for example in one `duckdb -c '...'`) is a syntax error: DuckDB parses
+  the whole script before the extension loads.
+- The CI workflow is in `ci/` until it is moved to `.github/workflows/`
+  (see `ci/README.md`); it builds `linux_amd64` and `osx_arm64` only.
 
 ## Building
+
+The quick way builds only the extension, not DuckDB, and downloads the
+official DuckDB CLI of the matching version to load it into:
 
 ```sh
 git clone --recurse-submodules https://github.com/lloydtabb/malloy-duckkdb
 cd malloy-duckkdb
-make            # builds DuckDB and the extension; takes a while the first time
-make test       # runs test/sql/*.test
-./build/release/duckdb
+scripts/quick-build.sh
+build/duckdb-cli/duckdb -unsigned
 ```
 
-The shell built by `make` has the extension linked in. To load the built
-extension into another DuckDB of the same version:
-
 ```sql
--- start duckdb with -unsigned
 LOAD 'build/release/extension/malloy/malloy.duckdb_extension';
+```
+
+`-unsigned` is needed because the build isn't signed by DuckDB. The
+extension only loads into the exact DuckDB version it was built against
+(v1.5.6, the `duckdb` submodule).
+
+The full build, which also builds DuckDB, its shell with the extension
+linked in, and the test runner for `test/sql/*.test`:
+
+```sh
+GEN=ninja make release
+make test
 ```
 
 To pick up a newer Malloy, rebuild the bundle from a Malloy checkout:
