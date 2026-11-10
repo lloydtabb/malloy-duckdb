@@ -107,8 +107,8 @@ to one of the functions above.
 
 ## Status
 
-Early prototype. Built and tested on Linux x86-64 against the official
-DuckDB v1.5.6 CLI; macOS and other platforms not yet tried.
+Early prototype. Built and tested against the official DuckDB v1.5.6 CLI
+on Linux x86-64 and macOS arm64; other platforms not yet tried.
 
 Compile speed in QuickJS, on 4 cores with the two-file flights model:
 
@@ -127,8 +127,8 @@ Known gaps:
 - A Malloy statement in the same script as the `LOAD malloy` before it
   (for example in one `duckdb -c '...'`) is a syntax error: DuckDB parses
   the whole script before the extension loads. Use `-cmd` for the `LOAD`.
-- The CI workflow is in `ci/` until it is moved to `.github/workflows/`
-  (see `ci/README.md`); it builds `linux_amd64` and `osx_arm64` only.
+- CI (`.github/workflows/MainDistributionPipeline.yml`) builds
+  `linux_amd64` and `osx_arm64` only.
 
 ## Building
 
