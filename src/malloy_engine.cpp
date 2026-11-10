@@ -296,27 +296,50 @@ Runtime &GetRuntime() {
 
 } // namespace
 
-string MalloyEngine::ToSQL(ClientContext &context, const string &model_url, const string &query) {
-	auto &rt = GetRuntime();
-	std::lock_guard<std::recursive_mutex> guard(rt.lock);
-	return rt.Call(&context, "toSQL", {model_url, query});
+//! Splits a driver listing: rows on newlines, cells on tabs.
+static vector<vector<string>> ParseListing(const string &listing) {
+	vector<vector<string>> rows;
+	if (listing.empty()) {
+		return rows;
+	}
+	for (auto &line : StringUtil::Split(listing, '\n')) {
+		rows.push_back(StringUtil::Split(line, '\t'));
+	}
+	return rows;
 }
 
-vector<pair<string, string>> MalloyEngine::DescribeModel(ClientContext &context, const string &model_url) {
+//! Driver arguments: the fixed ones, then the model's text if it is in memory
+//! (the driver reads the file at the model's URL when that is omitted).
+static vector<string> WithModelText(vector<string> args, const MalloyModel &model) {
+	if (model.in_memory) {
+		args.push_back(model.text);
+	}
+	return args;
+}
+
+string MalloyEngine::ToSQL(ClientContext &context, const MalloyModel &model, const string &query) {
 	auto &rt = GetRuntime();
-	string listing;
-	{
-		std::lock_guard<std::recursive_mutex> guard(rt.lock);
-		listing = rt.Call(&context, "describeModel", {model_url});
-	}
-	vector<pair<string, string>> entries;
-	for (auto &line : StringUtil::Split(listing, '\n')) {
-		auto tab = line.find('\t');
-		if (tab != string::npos) {
-			entries.emplace_back(line.substr(0, tab), line.substr(tab + 1));
-		}
-	}
-	return entries;
+	std::lock_guard<std::recursive_mutex> guard(rt.lock);
+	return rt.Call(&context, "toSQL", WithModelText({model.url, query}, model));
+}
+
+vector<vector<string>> MalloyEngine::ListContents(ClientContext &context, const MalloyModel &model) {
+	auto &rt = GetRuntime();
+	std::lock_guard<std::recursive_mutex> guard(rt.lock);
+	return ParseListing(rt.Call(&context, "listContents", WithModelText({model.url}, model)));
+}
+
+vector<vector<string>> MalloyEngine::Describe(ClientContext &context, const MalloyModel &model, const string &name) {
+	auto &rt = GetRuntime();
+	std::lock_guard<std::recursive_mutex> guard(rt.lock);
+	return ParseListing(rt.Call(&context, "describe", WithModelText({model.url, name}, model)));
+}
+
+vector<vector<string>> MalloyEngine::Define(ClientContext &context, const MalloyModel &model,
+                                           const string &statements) {
+	auto &rt = GetRuntime();
+	std::lock_guard<std::recursive_mutex> guard(rt.lock);
+	return ParseListing(rt.Call(&context, "define", {model.url, model.text, statements}));
 }
 
 string MalloyEngine::MalloyVersion() {

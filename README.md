@@ -9,38 +9,73 @@ runs the result, so Malloy queries compose with ordinary SQL.
 ```sql
 LOAD malloy;
 
--- Load a model: a local path, or with httpfs loaded, https:// or s3://.
--- Imports resolve relative to the model file.
-SELECT * FROM malloy_load('models/flights.malloy');
+-- Each connection has a Malloy model in memory, the session model.
+-- import, source: and query: add to it; relative paths resolve from the
+-- working directory, and with httpfs loaded, https:// and s3:// work too.
+import 'models/flights.malloy';
+source: long_flights is flights extend { where: distance > 1000 };
+query: busy is flights -> by_carrier;
 
--- Run Malloy; the result is a table like any other.
-SELECT * FROM malloy('run: flights -> by_carrier');
+show: sources;
+show: queries;
+describe source flights;
+show: session;              -- the session model's statements
 
--- ...so it composes with SQL.
+-- Run Malloy.
+run: flights -> by_carrier;
+run: busy;
+
+-- Malloy results are tables, so they compose with SQL.
 SELECT nickname, flight_count
 FROM malloy('run: flights -> by_carrier')
 WHERE flight_count > 1000;
 
--- Without a model, queries can name tables directly.
-SELECT * FROM malloy('run: duckdb.table(''flights'') -> { group_by: carrier; aggregate: n is count() }');
-
 -- See the SQL a query compiles to.
 SELECT sql FROM malloy_sql('run: flights -> by_carrier');
-
--- Bare Malloy statements, once the parser override is allowed:
-SET allow_parser_override_extension = 'fallback';
-run: flights -> { group_by: carrier; aggregate: n is count() }
 ```
 
+In the DuckDB CLI, end each statement with `;`, as for SQL.
+
+## Statements
+
+| Statement | Does |
+|---|---|
+| `import '...'` | Adds an import to the session model |
+| `source: ...`, `query: ...` | Adds definitions to the session model. A statement that doesn't compile is rejected, and the session model is unchanged |
+| `run: ...` | Runs a Malloy query against the session model |
+| `show: sources`, `show: queries` | Lists the sources or named queries the session model can see, imported ones included |
+| `describe source <name>`, `describe query <name>` | Lists the fields of a source, or a named query's output: name, kind (dimension, measure, join, view), and type |
+| `show: session` | Lists the statements in the session model |
+
+`show sources` without the colon works too, except in the DuckDB CLI: it is
+valid SQL (`SHOW` of a table named `sources`), and the CLI's PEG parser,
+described below, claims it first.
+
+Malloy statements reach the extension through DuckDB's parser override hook,
+which `LOAD malloy` turns on by setting `allow_parser_override_extension` to
+`fallback`, unless you have set it already. **In the DuckDB CLI this also
+turns on DuckDB's experimental PEG SQL parser** (the CLI's `autocomplete`
+extension registers it): SQL the PEG parser accepts is parsed by it, and
+anything it rejects falls back to DuckDB's usual parser. To turn the
+override off, `SET allow_parser_override_extension = 'default'`; the
+functions below keep working.
+
 ## Functions
+
+Every statement is a call to one of these, which can also be used directly.
 
 | Function | Returns |
 |---|---|
 | `malloy(query [, model := location])` | The query's rows |
 | `malloy_sql(query [, model := location])` | One row: the SQL the query compiles to |
-| `malloy_load(location)` | Sets this connection's model, and lists what it exports (`kind`, `name`, `model`) |
+| `malloy_define(statements)` | Adds `import`/`source:`/`query:` statements to the session model; lists what they define (`kind`, `name`) |
+| `malloy_load(location)` | The same as `malloy_define` of an `import` of `location` |
+| `malloy_sources([model := location])` | Every source and named query visible (`name`, `kind`) |
+| `malloy_describe(name [, model := location])` | The fields of a source or named query (`name`, `kind`, `type`) |
+| `malloy_session()` | The session model's statements |
 | `malloy_version()` | The Malloy version compiled in |
 
+`model :=` compiles against a model file instead of the session model.
 Inside DuckDB the Malloy connection is always named `duckdb`, as in
 `duckdb.table('flights')` and `duckdb.sql("""...""")`.
 
@@ -58,16 +93,17 @@ runs that loop and calls back into C++ (`src/malloy_engine.cpp`) for:
   so anything DuckDB can open works as a model location;
 - **schemas** of `duckdb.table(...)` and `duckdb.sql(...)` sources, found by
   binding `SELECT * FROM <source>` in the calling connection, so temporary
-  tables and uncommitted changes are visible.
+  tables and uncommitted changes are visible. Column types become Malloy
+  types through Malloy's own DuckDB type parser, so `STRUCT` and `LIST`
+  columns are records and arrays, as in any other Malloy DuckDB connection.
 
 `malloy()` then hands DuckDB the generated SQL as a subquery (the same
 mechanism as DuckDB's `query()` function), and DuckDB plans and runs it.
 
-Bare `run:` statements use DuckDB's parser override hook, which sees the
-statement before DuckDB splits it at semicolons (Malloy uses semicolons
-inside braces). DuckDB only calls that hook when
-`allow_parser_override_extension` is set, so without it a `run:` statement
-gets an error explaining how to enable it.
+Statements like `run:` reach the extension through DuckDB's parser
+override hook, which sees each statement before DuckDB splits it at
+semicolons (Malloy uses semicolons inside braces) and turns it into a call
+to one of the functions above.
 
 ## Status
 
@@ -85,14 +121,12 @@ Known gaps:
 
 - Timestamp literals and timezones (`@2003-01-15`, `timezone:`) don't
   compile yet: Malloy uses `luxon`, which needs `Intl`, and QuickJS has none.
-- `STRUCT` and `LIST` columns come through as SQL-native types, so Malloy's
-  nested-data features don't apply to them yet.
 - Every query re-reads the model and re-describes its tables; nothing is
   cached yet.
-- Only `run:` statements are recognized as bare Malloy.
-- A bare `run:` in the same script as the `LOAD malloy` that enables it
+- The session model belongs to one connection and ends with it.
+- A Malloy statement in the same script as the `LOAD malloy` before it
   (for example in one `duckdb -c '...'`) is a syntax error: DuckDB parses
-  the whole script before the extension loads.
+  the whole script before the extension loads. Use `-cmd` for the `LOAD`.
 - The CI workflow is in `ci/` until it is moved to `.github/workflows/`
   (see `ci/README.md`); it builds `linux_amd64` and `osx_arm64` only.
 
@@ -134,7 +168,7 @@ scripts/update-bundle.sh /path/to/malloy
 
 | Path | What |
 |---|---|
-| `src/malloy_extension.cpp` | Table functions, parser hooks, per-connection model |
+| `src/malloy_extension.cpp` | Table functions, statement recognition, the session model |
 | `src/malloy_engine.cpp` | QuickJS runtime and the C++ side of the compile loop |
 | `js/driver.js` | The JavaScript side of the compile loop |
 | `js/malloy-embedded.js` | The Malloy compiler bundle (generated; see `js/BUNDLE_SOURCE`) |

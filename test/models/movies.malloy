@@ -1,0 +1,15 @@
+source: movies is duckdb.table('movies') extend {
+  measure: movie_count is count()
+  view: by_genre is {
+    group_by: genre is genres.value
+    aggregate: movie_count
+  }
+  view: by_genre_each is {
+    group_by: genre is genres.each
+    aggregate: movie_count
+  }
+  view: by_director is {
+    group_by: director is directors.name
+    aggregate: movie_count
+  }
+}

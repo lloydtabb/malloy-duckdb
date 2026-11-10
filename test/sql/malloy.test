@@ -13,6 +13,14 @@ statement ok
 CREATE TABLE flights AS
 SELECT * FROM (VALUES ('AA', 'JFK', 100), ('AA', 'LAX', 200), ('UA', 'JFK', 300)) AS t(carrier, origin, distance);
 
+statement ok
+CREATE TABLE movies AS
+SELECT * FROM (VALUES
+  ('Alien', ['Horror', 'SciFi'], [{'name': 'Scott', 'born': 1937}]),
+  ('Heat', ['Crime'], [{'name': 'Mann', 'born': 1943}]),
+  ('Blade Runner', ['SciFi'], [{'name': 'Scott', 'born': 1937}])
+) AS t(title, genres, directors);
+
 # --- No model: queries can name tables directly ---------------------------
 
 query II
@@ -26,10 +34,10 @@ SELECT malloy_version IS NOT NULL FROM malloy_version();
 ----
 true
 
-# --- Loading a model --------------------------------------------------------
+# --- The session model: import, source:, query: ---------------------------
 
 query II
-SELECT kind, name FROM malloy_load('test/models/flights.malloy') ORDER BY name;
+SELECT * FROM malloy_load('test/models/flights.malloy');
 ----
 source	flights
 
@@ -39,7 +47,6 @@ SELECT * FROM malloy('run: flights -> by_carrier') ORDER BY nickname;
 American	2	300
 United	1	300
 
-# Malloy output composes with SQL
 query I
 SELECT nickname FROM malloy('run: flights -> by_carrier') WHERE flight_count > 1;
 ----
@@ -50,7 +57,105 @@ SELECT sql LIKE '%LEFT JOIN%' FROM malloy_sql('run: flights -> by_carrier');
 ----
 true
 
-# A model given per call, overriding the loaded one
+# Statements typed directly (LOAD turned on the parser override)
+query II
+import 'test/models/movies.malloy';
+----
+source	movies
+
+query II
+source: long_flights is flights extend { where: distance > 150 };
+----
+source	long_flights
+
+query II
+query: busy is flights -> by_carrier;
+----
+query	busy
+
+query I
+run: long_flights -> { aggregate: flight_count };
+----
+2
+
+query II
+SELECT * FROM malloy_sources() ORDER BY name;
+----
+busy	query
+flights	source
+long_flights	source
+movies	source
+
+query I
+show: sources;
+----
+flights
+long_flights
+movies
+
+query I
+show: queries;
+----
+busy
+
+query I
+SELECT count(*) FROM malloy_session();
+----
+4
+
+# A statement that does not compile is not added
+statement error
+source: bad is flights extend { dimension: x is no_such_column };
+----
+'no_such_column' is not defined
+
+query I
+SELECT count(*) FROM malloy_session();
+----
+4
+
+# --- describe ---------------------------------------------------------------
+
+query III
+describe source movies;
+----
+title	dimension	string
+movie_count	measure	number
+genres	dimension	string[]
+directors	dimension	{name :: string, born :: number}[]
+by_genre	view	view
+by_genre_each	view	view
+by_director	view	view
+
+statement error
+describe source nope;
+----
+No source or query named 'nope'
+
+# --- Nested DuckDB types ----------------------------------------------------
+
+query II
+run: movies -> by_genre + { order_by: genre };
+----
+Crime	1
+Horror	1
+SciFi	2
+
+query II
+run: movies -> by_genre_each + { order_by: genre };
+----
+Crime	1
+Horror	1
+SciFi	2
+
+query II
+run: movies -> by_director + { order_by: director };
+----
+Mann	1
+Scott	2
+
+# --- A model given per call, instead of the session model -------------------
+
 query I
 SELECT c FROM malloy('run: carriers -> { aggregate: c is count() }', model := 'test/models/carriers.malloy');
 ----
@@ -82,24 +187,17 @@ SELECT * FROM malloy('run: duckdb.table(''no_such_table'') -> { aggregate: c is 
 ----
 no_such_table
 
-# --- Bare Malloy statements -------------------------------------------------
-
-statement error
-run: flights -> by_carrier
-----
-allow_parser_override_extension
-
-statement ok
-SET allow_parser_override_extension = 'fallback';
-
-query II
-run: flights -> { group_by: carrier; aggregate: n is count(); order_by: carrier }
-----
-AA	2
-UA	1
-
 # Ordinary SQL still works with the override on
 query I
 SELECT count(*) FROM flights;
 ----
 3
+
+# With the override turned off, Malloy statements explain how to turn it on
+statement ok
+SET allow_parser_override_extension = 'default';
+
+statement error
+run: flights -> by_carrier
+----
+allow_parser_override_extension
