@@ -1,0 +1,5 @@
+source: carriers is duckdb.sql("""
+  SELECT * FROM (VALUES ('AA', 'American'), ('UA', 'United')) AS t(code, nickname)
+""") extend {
+  primary_key: code
+}

@@ -1,0 +1,105 @@
+# name: test/sql/malloy.test
+# description: query DuckDB with Malloy
+# group: [sql]
+
+statement error
+SELECT * FROM malloy('run: flights -> by_carrier');
+----
+Catalog Error
+
+require malloy
+
+statement ok
+CREATE TABLE flights AS
+SELECT * FROM (VALUES ('AA', 'JFK', 100), ('AA', 'LAX', 200), ('UA', 'JFK', 300)) AS t(carrier, origin, distance);
+
+# --- No model: queries can name tables directly ---------------------------
+
+query II
+SELECT * FROM malloy('run: duckdb.table(''flights'') -> { group_by: carrier; aggregate: total is distance.sum() }') ORDER BY carrier;
+----
+AA	300
+UA	300
+
+query I
+SELECT malloy_version IS NOT NULL FROM malloy_version();
+----
+true
+
+# --- Loading a model --------------------------------------------------------
+
+query II
+SELECT kind, name FROM malloy_load('test/models/flights.malloy') ORDER BY name;
+----
+source	flights
+
+query III
+SELECT * FROM malloy('run: flights -> by_carrier') ORDER BY nickname;
+----
+American	2	300
+United	1	300
+
+# Malloy output composes with SQL
+query I
+SELECT nickname FROM malloy('run: flights -> by_carrier') WHERE flight_count > 1;
+----
+American
+
+query I
+SELECT sql LIKE '%LEFT JOIN%' FROM malloy_sql('run: flights -> by_carrier');
+----
+true
+
+# A model given per call, overriding the loaded one
+query I
+SELECT c FROM malloy('run: carriers -> { aggregate: c is count() }', model := 'test/models/carriers.malloy');
+----
+2
+
+# Temporary tables are visible to Malloy
+statement ok
+CREATE TEMP TABLE scratch AS SELECT 42 AS answer;
+
+query I
+SELECT * FROM malloy('run: duckdb.table(''scratch'') -> { select: answer }');
+----
+42
+
+# --- Errors -----------------------------------------------------------------
+
+statement error
+SELECT * FROM malloy('run: flights -> no_such_view');
+----
+'no_such_view' is not defined
+
+statement error
+SELECT * FROM malloy_load('test/models/no_such_model.malloy');
+----
+no_such_model.malloy
+
+statement error
+SELECT * FROM malloy('run: duckdb.table(''no_such_table'') -> { aggregate: c is count() }');
+----
+no_such_table
+
+# --- Bare Malloy statements -------------------------------------------------
+
+statement error
+run: flights -> by_carrier
+----
+allow_parser_override_extension
+
+statement ok
+SET allow_parser_override_extension = 'fallback';
+
+query II
+run: flights -> { group_by: carrier; aggregate: n is count(); order_by: carrier }
+----
+AA	2
+UA	1
+
+# Ordinary SQL still works with the override on
+query I
+SELECT count(*) FROM flights;
+----
+3

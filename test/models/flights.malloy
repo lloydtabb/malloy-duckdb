@@ -1,0 +1,12 @@
+import 'carriers.malloy'
+
+source: flights is duckdb.table('flights') extend {
+  join_one: carriers with carrier
+  measure:
+    flight_count is count()
+    total_distance is distance.sum()
+  view: by_carrier is {
+    group_by: carriers.nickname
+    aggregate: flight_count, total_distance
+  }
+}
