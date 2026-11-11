@@ -346,10 +346,10 @@ string MalloyEngine::ToSQL(ClientContext &context, const MalloyModel &model, con
 	return rt.Call(&context, "toSQL", WithModelText({model.url, query}, model));
 }
 
-vector<vector<string>> MalloyEngine::ListContents(ClientContext &context, const MalloyModel &model) {
+vector<vector<string>> MalloyEngine::ListSources(ClientContext &context, const MalloyModel &model) {
 	auto &rt = GetRuntime();
 	std::lock_guard<std::recursive_mutex> guard(rt.lock);
-	return ParseListing(rt.Call(&context, "listContents", WithModelText({model.url}, model)));
+	return ParseListing(rt.Call(&context, "listSources", WithModelText({model.url}, model)));
 }
 
 vector<vector<string>> MalloyEngine::Describe(ClientContext &context, const MalloyModel &model, const string &name) {

@@ -53,7 +53,9 @@ for n, (kind, sql, expected) in enumerate(records):
     elif kind in ('statement ok', 'setup'):
         ok = not is_error
     else:
-        ok = not is_error and got.split('\n') == (expected or [])
+        # The test runner writes an empty string as (empty).
+        rows = ['\t'.join(c if c else '(empty)' for c in line.split('\t')) for line in got.split('\n')] if got else []
+        ok = not is_error and rows == (expected or [])
     if not ok:
         failures += 1
         print(f'FAIL #{n} {kind}: {sql[:100]}\n  expected: {expected}\n  got: {got[:600]!r}\n')

@@ -115,7 +115,7 @@ SELECT count(*) FROM malloy_session();
 3
 
 query III
-malloy sources;
+SELECT name, kind, "from" FROM malloy_sources();
 ----
 busy	query	session
 flights	source	session
@@ -128,16 +128,24 @@ malloy import 'test/models/movies.malloy';
 ----
 source	movies
 
-query III
-malloy describe movies;
+query IIII
+SELECT name, kind, type, grain FROM malloy_describe('movies');
 ----
-title	dimension	string
-movie_count	measure	number
-genres	dimension	string[]
-directors	dimension	{name :: string, born :: number}[]
-by_genre	view	view
-by_genre_each	view	view
-by_director	view	view
+title	dimension	string	(empty)
+movie_count	measure	number	(empty)
+genres	dimension	string[]	(empty)
+directors	dimension	{name :: string, born :: number}[]	(empty)
+by_genre	view	view	(empty)
+by_genre_each	view	view	(empty)
+by_director	view	view	(empty)
+genres.each	dimension	string	genres
+directors.name	dimension	string	directors
+directors.born	dimension	number	directors
+
+query II
+SELECT definition, example FROM malloy_describe('movies') WHERE name = 'movie_count';
+----
+count()	aggregate: movie_count
 
 query II
 run: movies -> by_genre + { order_by: genre };
@@ -187,10 +195,24 @@ airline/airline.malloy	airline/airline.malloy
 airline/airline.malloy	shared/carrier_names.malloy
 
 query III
-malloy sources;
+SELECT name, kind, "from" FROM malloy_sources();
 ----
 airline_flights	source	memory: airline/airline.malloy
 top_carriers	query	memory: airline/airline.malloy
+
+# Descriptions, joins and what's reached through them
+query III
+SELECT description, primary_key, joins FROM malloy_sources() WHERE name = 'airline_flights';
+----
+Flights, one row per flight	(empty)	carrier_names (one)
+
+query IIII
+SELECT name, kind, description, example FROM malloy_describe('airline_flights') WHERE name LIKE 'carrier_names%';
+----
+carrier_names	join	Carrier names, one row per carrier code	group_by: carrier_names.code
+carrier_names.code	dimension	(empty)	group_by: carrier_names.code; aggregate: n is count(carrier_names.code)
+carrier_names.nickname	dimension	(empty)	group_by: carrier_names.nickname; aggregate: n is count(carrier_names.nickname)
+carrier_names.shouted	dimension	The carrier's name in capitals	group_by: carrier_names.shouted; aggregate: n is count(carrier_names.shouted)
 
 query II
 run: airline_flights -> by_carrier + { order_by: nickname };

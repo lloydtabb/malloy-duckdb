@@ -1,5 +1,6 @@
 import '../shared/carrier_names.malloy'
 
+#" Flights, one row per flight
 source: airline_flights is duckdb.table('flights') extend {
   join_one: carrier_names with carrier
   measure: flight_count is count()

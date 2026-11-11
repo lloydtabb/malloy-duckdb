@@ -204,8 +204,8 @@ MALLOY_BIND(MalloyHelpBind) {
 	    {"run: <query>", "Runs a Malloy query"},
 	    {"%{ <query> }%", "A Malloy query inside SQL, anywhere a table can go"},
 	    {"source: ..., query: ...", "Defines a source or named query in this session"},
-	    {"malloy sources", "Lists the sources and named queries you can use"},
-	    {"malloy describe <name>", "Lists a source's fields, or a named query's output columns"},
+	    {"malloy sources", "Lists the sources and named queries you can use, with descriptions"},
+	    {"malloy describe <name>", "Lists a source's fields, through its joins, and how to use each"},
 	    {"malloy sql <statement>", "Shows a statement with its Malloy compiled to SQL"},
 	    {"malloy import '<location>'", "Loads a model into this session only"},
 	    {"malloy install '<location>'", "Copies a model into this database and installs its sources"},
@@ -301,13 +301,44 @@ MALLOY_BIND(MalloyResetBind) {
 //===--------------------------------------------------------------------===//
 MALLOY_BIND(MalloySourcesBind) {
 	auto state = GetMalloyState(context);
-	auto result = Columns(return_types, names, {"name", "kind", "from"});
-	for (auto &entry : state->names) {
-		result->rows.push_back({entry.first, entry.second, "session"});
-	}
-	for (auto &source : MalloyStore::List(context)) {
+	auto installed = MalloyStore::List(context);
+	std::map<string, string> from; // name -> where it comes from
+	for (auto &source : installed) {
 		if (!state->names.count(source.name)) {
-			result->rows.push_back({source.name, source.kind, source.catalog + ": " + source.model});
+			from[source.name] = source.catalog + ": " + source.model;
+		}
+	}
+	for (auto &entry : state->names) {
+		from[entry.first] = "session";
+	}
+	auto result = Columns(return_types, names,
+	                      {"name", "kind", "from", "description", "primary_key", "filters", "joins", "fields"});
+	if (from.empty()) {
+		return std::move(result);
+	}
+	// One compile of the session with every installed model imported.
+	string every_name;
+	for (auto &entry : from) {
+		every_name += MalloyName(entry.first) + "\n";
+	}
+	try {
+		for (auto &row : MalloyEngine::ListSources(context, SessionModel(context, every_name))) {
+			if (row.size() < 7 || !from.count(row[1])) {
+				continue;
+			}
+			result->rows.push_back({row[1], row[0], from[row[1]], row[2], row[3], row[4], row[5], row[6]});
+		}
+	} catch (std::exception &ex) {
+		// Still list what is there, and say why there is no more.
+		ErrorData error(ex);
+		for (auto &entry : from) {
+			auto kind = state->names.count(entry.first) ? state->names[entry.first] : string();
+			for (auto &source : installed) {
+				if (source.name == entry.first && kind.empty()) {
+					kind = source.kind;
+				}
+			}
+			result->rows.push_back({entry.first, kind, entry.second, "(not compiled: " + error.RawMessage() + ")"});
 		}
 	}
 	std::sort(result->rows.begin(), result->rows.end());
@@ -326,7 +357,7 @@ MALLOY_BIND(MalloyDescribeBind) {
 	if (!known) {
 		throw BinderException("Malloy: no source or query named '%s'; malloy sources lists them", name);
 	}
-	auto result = Columns(return_types, names, {"name", "kind", "type"});
+	auto result = Columns(return_types, names, {"name", "kind", "type", "grain", "description", "definition", "usage", "example"});
 	result->rows = MalloyEngine::Describe(context, SessionModel(context, MalloyName(name)), name);
 	return std::move(result);
 }

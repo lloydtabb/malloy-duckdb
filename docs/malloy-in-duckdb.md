@@ -41,8 +41,9 @@ LOAD '/path/to/malloy-duckdb/build/release/extension/malloy/malloy.duckdb_extens
 malloy sources;
 ```
 
-This lists every source you can query: those installed in this database,
-and any you defined in this session. A new database has none.
+This lists every source you can query, with its description: those
+installed in this database, and any you defined in this session. A new
+database has none.
 
 ### Embed a Malloy query
 
@@ -129,21 +130,101 @@ You can also install from a URL, such as
 `https://raw.githubusercontent.com/acme/models/main/imdb.malloy`, or from
 `s3://`. The model is copied the same way; the URL isn't read again.
 
-### 2. Use it
+### 2. Explore it
 
 ```sql
 malloy sources;
-malloy describe movies;
-SELECT * FROM %{ movies -> by_genre }%;
-run: movies -> by_genre;
 ```
 
-`malloy describe` lists a source's fields: dimensions, measures, joins and
-views, with their types.
+```
+┌────────┬────────┬─────────────────────┬──────────────────────────────┬─────────────┬─────────────────┬────────────────────────────┬─────────────────────────────────┐
+│  name  │  kind  │        from         │         description          │ primary_key │     filters     │           joins            │             fields              │
+├────────┼────────┼─────────────────────┼──────────────────────────────┼─────────────┼─────────────────┼────────────────────────────┼─────────────────────────────────┤
+│ movies │ source │ memory: imdb.malloy │ Movies, one row per title    │ id          │ released > 1900 │ credits (many), lead (one) │ 6 dimensions, 1 measure, 1 view │
+│ people │ source │ memory: imdb.malloy │ People who work in film      │ id          │                 │                            │ 2 dimensions, 1 measure         │
+└────────┴────────┴─────────────────────┴──────────────────────────────┴─────────────┴─────────────────┴────────────────────────────┴─────────────────────────────────┘
+```
+
+Each source and named query, with where it comes from (`session`, or the
+database and model it's installed from), its description, primary key,
+source-level filters, joins with their relationships, and a count of its
+own fields.
+
+```sql
+malloy describe movies;
+```
+
+lists every field of a source, the source's own and then everything reached
+through its joins and nested data, with:
+
+| Column | Holds |
+|---|---|
+| `name` | The field's path, as a query writes it: `decade`, `lead.name`, `credits.role`, `genres.each` |
+| `kind` | `dimension`, `measure`, `calculation`, `view` or `join` |
+| `type` | `string`, `number`, `string[]`, `{name :: string}[]`, `join_one`, `join_many`... |
+| `grain` | Empty for one value per row of the source. Otherwise the `join_many` or nested array the field is per: `credits` for `credits.role` |
+| `description` | The field's description |
+| `definition` | The Malloy expression that defines it: `count()`, `floor(released / 10) * 10` |
+| `usage` | How a query uses it, in a sentence |
+| `example` | Clauses that use it, ready to paste inside `run: movies -> { ... }` |
+
+For example, through a `join_many`:
+
+| name | kind | grain | example |
+|---|---|---|---|
+| `credits` | join | | `aggregate: n is credits.count(); group_by: credits.movie_id; aggregate: total is credits.movie_id.sum()` |
+| `credits.role` | dimension | `credits` | `group_by: credits.role; aggregate: n is count(credits.role)` |
+| `lead.person_count` | measure | | `aggregate: lead.person_count` |
+| `genres` | dimension | | `group_by: genres.each; aggregate: n is genres.count()` |
+| `directors.name` | dimension | `directors` | `group_by: directors.name; aggregate: n is count(directors.name)` |
+
+A join's examples use its first column; every field of the join has its own
+row with its own examples.
+
+The grain is what to watch in calculations:
+
+- **Grouping by a field with a grain gives a row per row of the grain.**
+  `group_by: credits.role` gives a row per credit role. Measures of the
+  source, such as `movie_count`, still count each movie once.
+- **Aggregating a joined field runs over the rows of the source it comes
+  from, each counted once**, through a `join_one` or a `join_many`:
+  `lead.person_count` counts distinct lead people, not movies.
+- **Count rows of a join or array with `.count()`**: `credits.count()`,
+  `genres.count()`. An aggregate expression needs a name:
+  `aggregate: n is credits.count()`.
+
+Every example in the `example` column is checked by compiling it, so it
+works as written.
+
+To query it:
+
+```sql
+SELECT * FROM %{ movies -> by_genre }%;
+run: movies -> { group_by: credits.role; aggregate: movie_count };
+```
 
 When a query names a source that isn't defined in the session, the
 extension finds it among the installed sources and loads its model from the
 database, and only the models the query needs.
+
+### Describe your model
+
+Descriptions come from the model. Write one with `#"` above a source, a
+join, a field or a query (Malloy's description annotation; `#(docs)` also
+works):
+
+```malloy
+#" Movies, one row per title
+source: movies is duckdb.table('movies') extend {
+  #" The decade the movie was released in
+  dimension: decade is floor(released / 10) * 10
+  #" Everyone credited on the movie, one row per credit
+  join_many: credits is duckdb.table('credits') on credits.movie_id = id
+}
+```
+
+A table's own columns can't be annotated. To describe one, define a
+dimension from it with a new name.
 
 ### Make the data travel too
 
@@ -317,8 +398,8 @@ A statement that starts with one of these is Malloy, not SQL:
 | Command | Does |
 |---|---|
 | `malloy` | Lists the commands |
-| `malloy sources` | Lists the sources and named queries you can use, with where each comes from |
-| `malloy describe <name>` | Lists a source's fields, or a named query's output columns: name, kind, type |
+| `malloy sources` | Lists the sources and named queries you can use: where each comes from, description, primary key, filters, joins, fields |
+| `malloy describe <name>` | Lists every field of a source, through its joins and nested data: path, kind, type, grain, description, definition, usage, example |
 | `malloy sql <statement>` | Shows a statement with its Malloy compiled to SQL |
 | `malloy import '<location>'` | Loads a model into this session only, from your files or a URL |
 | `malloy install '<location>'` | Copies a model and its imports into this database and installs its exported sources |

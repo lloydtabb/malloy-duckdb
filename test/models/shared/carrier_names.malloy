@@ -1,3 +1,6 @@
+#" Carrier names, one row per carrier code
 source: carrier_names is duckdb.table('carrier_names') extend {
   primary_key: code
+  #" The carrier's name in capitals
+  dimension: shouted is upper(nickname)
 }

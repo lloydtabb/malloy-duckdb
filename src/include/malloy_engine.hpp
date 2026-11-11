@@ -27,12 +27,13 @@ public:
 	//! error.
 	static string ToSQL(ClientContext &context, const MalloyModel &model, const string &query);
 
-	//! Every source and named query the model can see, imports included, as
-	//! (kind, name) rows.
-	static vector<vector<string>> ListContents(ClientContext &context, const MalloyModel &model);
+	//! Every source and named query the model can see, imports included:
+	//! (kind, name, description, primary_key, filters, joins, fields) rows.
+	static vector<vector<string>> ListSources(ClientContext &context, const MalloyModel &model);
 
-	//! The fields of the source or named query `name`, as (name, kind, type)
-	//! rows.
+	//! The fields of the source or named query `name`, through its joins and
+	//! nested data: (path, kind, type, grain, description, definition, usage,
+	//! example).
 	static vector<vector<string>> Describe(ClientContext &context, const MalloyModel &model, const string &name);
 
 	//! Checks that `statements` compile when added to the session model

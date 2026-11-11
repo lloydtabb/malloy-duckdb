@@ -97,6 +97,13 @@
     throw new Error('Malloy compile did not finish');
   }
 
+  // Every source and named query the model can see, described: see
+  // compileModelCatalog in malloy-embedded's catalog.ts.
+  function catalog(modelURL, modelText) {
+    const response = drive(malloy.compileModelCatalog, {model_url: modelURL}, modelText);
+    return (response.catalog && response.catalog.entries) || [];
+  }
+
   // Everything the model can see: sources and named queries, imports included.
   function contents(modelURL, modelText, session) {
     const response = drive(malloy.compileModelContents, {model_url: modelURL}, modelText, session);
@@ -109,44 +116,6 @@
     const p = String(path).replace(/^['"]|['"]$/g, '');
     if (p.startsWith('/') || /^[a-z][a-z0-9+.-]*:\/\//i.test(p) || /^[A-Za-z]:[\\/]/.test(p)) return false;
     return p.includes('/') || /\.(parquet|csv|tsv|json|jsonl|ndjson|xlsx)$/i.test(p);
-  }
-
-  function typeName(type) {
-    switch (type.kind) {
-      case 'string_type':
-        return 'string';
-      case 'number_type':
-        return 'number';
-      case 'boolean_type':
-        return 'boolean';
-      case 'date_type':
-        return 'date';
-      case 'timestamp_type':
-        return 'timestamp';
-      case 'timestamptz_type':
-        return 'timestamptz';
-      case 'json_type':
-        return 'json';
-      case 'sql_native_type':
-        return type.sql_type ? `sql native (${type.sql_type})` : 'sql native';
-      case 'array_type':
-        return typeName(type.element_type) + '[]';
-      case 'record_type':
-        return '{' + type.fields.map(f => `${f.name} :: ${typeName(f.type)}`).join(', ') + '}';
-      default:
-        return type.kind.replace(/_type$/, '').replace(/_/g, ' ');
-    }
-  }
-
-  function fieldType(field) {
-    switch (field.kind) {
-      case 'join':
-        return `join_${field.relationship}`;
-      case 'view':
-        return 'view';
-      default:
-        return field.type ? typeName(field.type) : '';
-    }
   }
 
   // Listings are rows on lines, cells separated by tabs; backslash escapes
@@ -173,20 +142,59 @@
       return response.result.sql;
     },
 
-    // Rows of kind, name: every source and named query the model can see.
-    listContents(modelURL, modelText) {
-      return listing(contents(modelURL, modelText).map(e => [e.kind, e.name]));
+    // Rows of kind, name, description, primary_key, filters, joins, fields:
+    // every source and named query the model can see.
+    listSources(modelURL, modelText) {
+      return listing(
+        catalog(modelURL, modelText).map(e => {
+          const joins = e.fields
+            .filter(f => f.kind === 'join' && !f.path.includes('.'))
+            .map(f => `${f.path} (${f.type.replace(/^join_/, '')})`);
+          const own = e.fields.filter(f => !f.path.includes('.') && f.kind !== 'join');
+          const count = kind => own.filter(f => f.kind === kind).length;
+          const counts = [
+            [count('dimension'), 'dimension'],
+            [count('measure'), 'measure'],
+            [count('calculation'), 'calculation'],
+            [count('view'), 'view'],
+          ]
+            .filter(([n]) => n > 0)
+            .map(([n, word]) => `${n} ${word}${n === 1 ? '' : 's'}`);
+          return [
+            e.kind,
+            e.name,
+            e.description || '',
+            e.primary_key || '',
+            e.filters.join('; '),
+            joins.join(', '),
+            counts.join(', '),
+          ];
+        })
+      );
     },
 
-    // Rows of name, kind, type: the fields of one source or named query.
+    // Rows of path, kind, type, grain, description, definition, usage,
+    // example: every field of one source or named query, through its joins
+    // and nested data.
     describe(modelURL, name, modelText) {
-      const entries = contents(modelURL, modelText);
+      const entries = catalog(modelURL, modelText);
       const entry = entries.find(e => e.name === name);
       if (!entry) {
         const known = entries.map(e => e.name).sort().join(', ');
         throw new Error(`No source or query named '${name}'` + (known ? `; defined: ${known}` : '; nothing is defined yet'));
       }
-      return listing(entry.schema.fields.map(f => [f.name, f.kind, fieldType(f)]));
+      return listing(
+        entry.fields.map(f => [
+          f.path,
+          f.kind,
+          f.type,
+          f.grain,
+          f.description || '',
+          f.definition || '',
+          f.usage,
+          (f.examples || []).join('; '),
+        ])
+      );
     },
 
     // Checks that `newText` (import, source:, query: statements) compiles
