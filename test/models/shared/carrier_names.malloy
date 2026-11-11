@@ -1,0 +1,3 @@
+source: carrier_names is duckdb.table('carrier_names') extend {
+  primary_key: code
+}

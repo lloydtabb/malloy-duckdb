@@ -1,5 +1,5 @@
 # name: test/sql/malloy.test
-# description: query DuckDB with Malloy
+# description: Malloy in DuckDB: embedded queries, the session model, installed models
 # group: [sql]
 
 statement error
@@ -14,6 +14,10 @@ CREATE TABLE flights AS
 SELECT * FROM (VALUES ('AA', 'JFK', 100), ('AA', 'LAX', 200), ('UA', 'JFK', 300)) AS t(carrier, origin, distance);
 
 statement ok
+CREATE TABLE carrier_names AS
+SELECT * FROM (VALUES ('AA', 'American'), ('UA', 'United')) AS t(code, nickname);
+
+statement ok
 CREATE TABLE movies AS
 SELECT * FROM (VALUES
   ('Alien', ['Horror', 'SciFi'], [{'name': 'Scott', 'born': 1937}]),
@@ -21,47 +25,63 @@ SELECT * FROM (VALUES
   ('Blade Runner', ['SciFi'], [{'name': 'Scott', 'born': 1937}])
 ) AS t(title, genres, directors);
 
-# --- No model: queries can name tables directly ---------------------------
+# --- Embedded Malloy, no model ---------------------------------------------
 
 query II
-SELECT * FROM malloy('run: duckdb.table(''flights'') -> { group_by: carrier; aggregate: total is distance.sum() }') ORDER BY carrier;
+SELECT * FROM %{ duckdb.table('flights') -> { group_by: carrier; aggregate: total is distance.sum() } }% ORDER BY carrier;
 ----
 AA	300
 UA	300
+
+query II
+run: duckdb.table('flights') -> { group_by: carrier; aggregate: n is count(); order_by: carrier };
+----
+AA	2
+UA	1
 
 query I
 SELECT malloy_version IS NOT NULL FROM malloy_version();
 ----
 true
 
-# --- The session model: import, source:, query: ---------------------------
+query I
+SELECT count(*) > 10 FROM malloy_help();
+----
+true
+
+# --- The session model --------------------------------------------------------
 
 query II
-SELECT * FROM malloy_load('test/models/flights.malloy');
+malloy import 'test/models/flights.malloy';
 ----
 source	flights
 
 query III
-SELECT * FROM malloy('run: flights -> by_carrier') ORDER BY nickname;
+run: flights -> by_carrier + { order_by: nickname };
 ----
 American	2	300
 United	1	300
 
+# Embedded queries go anywhere a table can, and compose with SQL
 query I
-SELECT nickname FROM malloy('run: flights -> by_carrier') WHERE flight_count > 1;
+SELECT nickname FROM %{ flights -> by_carrier }% WHERE flight_count > 1;
 ----
 American
 
 query I
-SELECT sql LIKE '%LEFT JOIN%' FROM malloy_sql('run: flights -> by_carrier');
+SELECT count(*) FROM (%{ flights -> by_carrier }%) AS f JOIN carrier_names AS c ON c.nickname = f.nickname;
+----
+2
+
+query I
+SELECT (SELECT max(flight_count) FROM %{ flights -> by_carrier }%) + (SELECT count(*) FROM %{ flights -> by_carrier }%);
+----
+4
+
+query I
+SELECT sql LIKE 'SELECT nickname FROM (SELECT %' FROM malloy_sql('SELECT nickname FROM %{ flights -> by_carrier }%');
 ----
 true
-
-# Statements typed directly (LOAD turned on the parser override)
-query II
-import 'test/models/movies.malloy';
-----
-source	movies
 
 query II
 source: long_flights is flights extend { where: distance > 150 };
@@ -78,30 +98,10 @@ run: long_flights -> { aggregate: flight_count };
 ----
 2
 
-query II
-SELECT * FROM malloy_sources() ORDER BY name;
-----
-busy	query
-flights	source
-long_flights	source
-movies	source
-
-query I
-show: sources;
-----
-flights
-long_flights
-movies
-
-query I
-show: queries;
-----
-busy
-
 query I
 SELECT count(*) FROM malloy_session();
 ----
-4
+3
 
 # A statement that does not compile is not added
 statement error
@@ -112,12 +112,24 @@ source: bad is flights extend { dimension: x is no_such_column };
 query I
 SELECT count(*) FROM malloy_session();
 ----
-4
-
-# --- describe ---------------------------------------------------------------
+3
 
 query III
-describe source movies;
+malloy sources;
+----
+busy	query	session
+flights	source	session
+long_flights	source	session
+
+# --- describe and nested types -------------------------------------------------
+
+query II
+malloy import 'test/models/movies.malloy';
+----
+source	movies
+
+query III
+malloy describe movies;
 ----
 title	dimension	string
 movie_count	measure	number
@@ -127,22 +139,8 @@ by_genre	view	view
 by_genre_each	view	view
 by_director	view	view
 
-statement error
-describe source nope;
-----
-No source or query named 'nope'
-
-# --- Nested DuckDB types ----------------------------------------------------
-
 query II
 run: movies -> by_genre + { order_by: genre };
-----
-Crime	1
-Horror	1
-SciFi	2
-
-query II
-run: movies -> by_genre_each + { order_by: genre };
 ----
 Crime	1
 Horror	1
@@ -154,40 +152,147 @@ run: movies -> by_director + { order_by: director };
 Mann	1
 Scott	2
 
-# --- A model given per call, instead of the session model -------------------
+statement error
+malloy describe nope;
+----
+no source or query named 'nope'
+
+statement ok
+malloy reset;
 
 query I
-SELECT c FROM malloy('run: carriers -> { aggregate: c is count() }', model := 'test/models/carriers.malloy');
+SELECT count(*) FROM malloy_session();
+----
+0
+
+# --- Installing a model ------------------------------------------------------------
+
+query II
+malloy check 'test/models/airline/airline.malloy';
+----
+airline_flights	source
+top_carriers	query
+
+query III
+malloy install 'test/models/airline/airline.malloy';
+----
+airline_flights	source	airline/airline.malloy
+top_carriers	query	airline/airline.malloy
+
+# The model and the file it imports from ../shared are both stored
+query II
+SELECT model, path FROM malloy.files ORDER BY path;
+----
+airline/airline.malloy	airline/airline.malloy
+airline/airline.malloy	shared/carrier_names.malloy
+
+query III
+malloy sources;
+----
+airline_flights	source	memory: airline/airline.malloy
+top_carriers	query	memory: airline/airline.malloy
+
+query II
+run: airline_flights -> by_carrier + { order_by: nickname };
+----
+American	2
+United	1
+
+query II
+SELECT * FROM %{ top_carriers }% ORDER BY nickname;
+----
+American	2
+United	1
+
+# A session definition built on an installed source
+query II
+source: aa_flights is airline_flights extend { where: carrier = 'AA' };
+----
+source	aa_flights
+
+query I
+run: aa_flights -> { aggregate: flight_count };
 ----
 2
 
-# Temporary tables are visible to Malloy
 statement ok
-CREATE TEMP TABLE scratch AS SELECT 42 AS answer;
+malloy reset;
+
+# Installing again replaces the model
+query III
+malloy install 'test/models/airline/airline.malloy';
+----
+airline_flights	source	airline/airline.malloy
+top_carriers	query	airline/airline.malloy
 
 query I
-SELECT * FROM malloy('run: duckdb.table(''scratch'') -> { select: answer }');
+SELECT count(*) FROM malloy.sources;
 ----
-42
+2
 
-# --- Errors -----------------------------------------------------------------
+query III
+malloy update;
+----
+airline_flights	source	airline/airline.malloy
+top_carriers	query	airline/airline.malloy
+
+# A model that reads a file by a relative path installs, with a warning
+query III
+SELECT name LIKE 'reads the file%', kind, model FROM malloy_install('test/models/local/local_data.malloy') ORDER BY kind;
+----
+false	source	local_data.malloy
+true	warning	local_data.malloy
+
+# Removing one source, then a whole model
+query I
+malloy uninstall top_carriers;
+----
+top_carriers
+
+query I
+SELECT name FROM malloy.sources ORDER BY name;
+----
+airline_flights
+local_numbers
+
+query I
+malloy uninstall 'airline/airline.malloy';
+----
+airline_flights
+
+query I
+SELECT count(*) FROM malloy.files WHERE model = 'airline/airline.malloy';
+----
+0
 
 statement error
-SELECT * FROM malloy('run: flights -> no_such_view');
+run: airline_flights -> by_carrier;
 ----
-'no_such_view' is not defined
+airline_flights
+
+# --- Errors --------------------------------------------------------------------------
 
 statement error
-SELECT * FROM malloy_load('test/models/no_such_model.malloy');
+malloy frobnicate;
+----
+unknown command 'malloy frobnicate'
+
+statement error
+malloy install test/models/airline/airline.malloy;
+----
+needs a quoted location
+
+statement error
+malloy import 'test/models/no_such_model.malloy';
 ----
 no_such_model.malloy
 
 statement error
-SELECT * FROM malloy('run: duckdb.table(''no_such_table'') -> { aggregate: c is count() }');
+run: duckdb.table('no_such_table') -> { aggregate: c is count() };
 ----
 no_such_table
 
-# Ordinary SQL still works with the override on
+# Ordinary SQL still works
 query I
 SELECT count(*) FROM flights;
 ----

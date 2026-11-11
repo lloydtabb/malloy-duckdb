@@ -35,10 +35,16 @@ public:
 	//! rows.
 	static vector<vector<string>> Describe(ClientContext &context, const MalloyModel &model, const string &name);
 
-	//! Checks that `statements` compile when appended to the in-memory model,
-	//! and returns (kind, name) rows for what they newly define or import.
-	//! Changes nothing; the caller appends them.
-	static vector<vector<string>> Define(ClientContext &context, const MalloyModel &model, const string &statements);
+	//! Checks that `statements` compile when added to the session model
+	//! (`prefix`, imports of the installed sources it needs, then `session`),
+	//! and returns (kind, name) rows for what they newly define. Changes
+	//! nothing; the caller appends them.
+	static vector<vector<string>> Define(ClientContext &context, const string &url, const string &prefix,
+	                                     const string &session, const string &statements);
+
+	//! Compiles the model file at `url`. Rows: (file, url, contents) for every
+	//! file read, (entry, kind, name) for every export, (warning, message).
+	static vector<vector<string>> Collect(ClientContext &context, const string &url);
 
 	//! The Malloy version the bundle was built from.
 	static string MalloyVersion();

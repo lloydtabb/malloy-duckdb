@@ -1,83 +1,37 @@
 # malloy-duckdb
 
-A DuckDB extension that lets you query with [Malloy](https://www.malloydata.dev)
-instead of SQL. Malloy compiles to DuckDB SQL inside the extension, and DuckDB
-runs the result, so Malloy queries compose with ordinary SQL.
+A DuckDB extension for using [Malloy](https://www.malloydata.dev) inside
+DuckDB SQL. Install a Malloy model into a database, and anyone who opens it
+can query the model's sources.
 
-> **Status: early prototype.** Works on Linux against DuckDB v1.5.6; see [Status](#status).
+> **Status: early prototype.** Works against DuckDB v1.5.6 on Linux and
+> macOS; see [Status](#status).
 
 ```sql
 LOAD malloy;
 
--- Each connection has a Malloy model in memory, the session model.
--- import, source: and query: add to it; relative paths resolve from the
--- working directory, and with httpfs loaded, https:// and s3:// work too.
-import 'models/flights.malloy';
-source: long_flights is flights extend { where: distance > 1000 };
-query: busy is flights -> by_carrier;
+-- Copy a model, and every file it imports, into this database.
+malloy install 'models/imdb.malloy';
+malloy sources;
+malloy describe movies;
 
-show: sources;
-show: queries;
-describe source flights;
-show: session;              -- the session model's statements
+-- Malloy inside SQL, anywhere a table can go ...
+SELECT genre, movie_count
+FROM %{ movies -> by_genre }%
+WHERE movie_count > 100;
 
--- Run Malloy.
-run: flights -> by_carrier;
-run: busy;
+-- ... or on its own.
+run: movies -> by_genre;
 
--- Malloy results are tables, so they compose with SQL.
-SELECT nickname, flight_count
-FROM malloy('run: flights -> by_carrier')
-WHERE flight_count > 1000;
-
--- See the SQL a query compiles to.
-SELECT sql FROM malloy_sql('run: flights -> by_carrier');
+-- Test a change to your files in this session only, then publish it.
+malloy import 'models/imdb.malloy';
+malloy install 'models/imdb.malloy';
 ```
 
-In the DuckDB CLI, end each statement with `;`, as for SQL.
-
-## Statements
-
-| Statement | Does |
-|---|---|
-| `import '...'` | Adds an import to the session model |
-| `source: ...`, `query: ...` | Adds definitions to the session model. A statement that doesn't compile is rejected, and the session model is unchanged |
-| `run: ...` | Runs a Malloy query against the session model |
-| `show: sources`, `show: queries` | Lists the sources or named queries the session model can see, imported ones included |
-| `describe source <name>`, `describe query <name>` | Lists the fields of a source, or a named query's output: name, kind (dimension, measure, join, view), and type |
-| `show: session` | Lists the statements in the session model |
-
-`show sources` without the colon works too, except in the DuckDB CLI: it is
-valid SQL (`SHOW` of a table named `sources`), and the CLI's PEG parser,
-described below, claims it first.
-
-Malloy statements reach the extension through DuckDB's parser override hook,
-which `LOAD malloy` turns on by setting `allow_parser_override_extension` to
-`fallback`, unless you have set it already. **In the DuckDB CLI this also
-turns on DuckDB's experimental PEG SQL parser** (the CLI's `autocomplete`
-extension registers it): SQL the PEG parser accepts is parsed by it, and
-anything it rejects falls back to DuckDB's usual parser. To turn the
-override off, `SET allow_parser_override_extension = 'default'`; the
-functions below keep working.
-
-## Functions
-
-Every statement is a call to one of these, which can also be used directly.
-
-| Function | Returns |
-|---|---|
-| `malloy(query [, model := location])` | The query's rows |
-| `malloy_sql(query [, model := location])` | One row: the SQL the query compiles to |
-| `malloy_define(statements)` | Adds `import`/`source:`/`query:` statements to the session model; lists what they define (`kind`, `name`) |
-| `malloy_load(location)` | The same as `malloy_define` of an `import` of `location` |
-| `malloy_sources([model := location])` | Every source and named query visible (`name`, `kind`) |
-| `malloy_describe(name [, model := location])` | The fields of a source or named query (`name`, `kind`, `type`) |
-| `malloy_session()` | The session model's statements |
-| `malloy_version()` | The Malloy version compiled in |
-
-`model :=` compiles against a model file instead of the session model.
-Inside DuckDB the Malloy connection is always named `duckdb`, as in
-`duckdb.table('flights')` and `duckdb.sql("""...""")`.
+The full guide, covering getting started, installing models and testing
+changes, is [docs/malloy-in-duckdb.md](docs/malloy-in-duckdb.md). `malloy`
+on its own lists the commands. In the DuckDB CLI, end each statement with
+`;`, as for SQL.
 
 ## How it works
 
@@ -86,24 +40,29 @@ The Malloy compiler is TypeScript. This extension embeds
 engine written in C, and runs the compiler in it as one bundled script
 (`js/malloy-embedded.js`, built by Malloy's `packages/malloy-embedded`).
 
-The compiler does no IO itself; it asks for what it needs. `js/driver.js`
-runs that loop and calls back into C++ (`src/malloy_engine.cpp`) for:
-
-- **files** (the model and its imports), read through DuckDB's file system,
-  so anything DuckDB can open works as a model location;
-- **schemas** of `duckdb.table(...)` and `duckdb.sql(...)` sources, found by
-  binding `SELECT * FROM <source>` in the calling connection, so temporary
-  tables and uncommitted changes are visible. Column types become Malloy
-  types through Malloy's own DuckDB type parser, so `STRUCT` and `LIST`
-  columns are records and arrays, as in any other Malloy DuckDB connection.
-
-`malloy()` then hands DuckDB the generated SQL as a subquery (the same
-mechanism as DuckDB's `query()` function), and DuckDB plans and runs it.
-
-Statements like `run:` reach the extension through DuckDB's parser
-override hook, which sees each statement before DuckDB splits it at
-semicolons (Malloy uses semicolons inside braces) and turns it into a call
-to one of the functions above.
+- **Recognizing Malloy.** DuckDB's parser override hook offers the
+  extension every script before DuckDB parses it. `src/malloy_statements.cpp`
+  splits it into statements and rewrites the Malloy in it (`run:`,
+  `source:`, `query:`, `malloy` commands, and `%{ }%` inside SQL, following
+  MalloySQL's syntax) into SQL calling the extension's table functions.
+  Scripts with no Malloy are left for DuckDB to parse as usual.
+- **Compiling.** The compiler does no IO itself; it asks for what it needs.
+  `js/driver.js` runs that loop and calls back into C++
+  (`src/malloy_engine.cpp`) for files, read through DuckDB's file system or,
+  for installed models, from the database, and for the schemas of
+  `duckdb.table(...)` and `duckdb.sql(...)` sources, found by binding
+  `SELECT * FROM <source>` in the calling connection. Column types become
+  Malloy types through Malloy's own DuckDB type parser.
+- **Running.** `malloy()` hands DuckDB the generated SQL as a subquery (the
+  same mechanism as DuckDB's `query()` function), and DuckDB plans and runs
+  it.
+- **The session model.** Each connection keeps the statements it has
+  imported and defined, and compiles queries against them. A query that
+  names an installed source also gets an `import` of that source's model,
+  so only the models a query uses are compiled.
+- **Installed models** are rows in `malloy.files` and `malloy.sources`
+  (`src/malloy_store.cpp`), read and written through a second connection to
+  the same database.
 
 ## Status
 
@@ -121,9 +80,12 @@ Known gaps:
 
 - Timestamp literals and timezones (`@2003-01-15`, `timezone:`) don't
   compile yet: Malloy uses `luxon`, which needs `Intl`, and QuickJS has none.
-- Every query re-reads the model and re-describes its tables; nothing is
-  cached yet.
+- Every query recompiles the models it uses, rereading their files and
+  re-describing their tables; nothing is cached yet.
 - The session model belongs to one connection and ends with it.
+- Not yet tried with MotherDuck beyond a simple query.
+- An error in a Malloy statement is reported with the SQL it was rewritten
+  into (`LINE 1: SELECT * FROM malloy(...)`), not the text you typed.
 - A Malloy statement in the same script as the `LOAD malloy` before it
   (for example in one `duckdb -c '...'`) is a syntax error: DuckDB parses
   the whole script before the extension loads. Use `-cmd` for the `LOAD`.
@@ -156,6 +118,12 @@ relative path from one ("relative path not allowed in hardened program").
 extension only loads into the exact DuckDB version it was built against
 (v1.5.6, the `duckdb` submodule).
 
+To run the SQL tests against that CLI, without a full build:
+
+```sh
+scripts/run-tests-cli.py
+```
+
 The full build, which also builds DuckDB, its shell with the extension
 linked in, and the test runner for `test/sql/*.test`:
 
@@ -174,10 +142,13 @@ scripts/update-bundle.sh /path/to/malloy
 
 | Path | What |
 |---|---|
-| `src/malloy_extension.cpp` | Table functions, statement recognition, the session model |
+| `src/malloy_extension.cpp` | Table functions, the session model, registration |
+| `src/malloy_statements.cpp` | Recognizing and rewriting Malloy statements and `%{ }%` |
+| `src/malloy_store.cpp` | Installed models: the `malloy.files` and `malloy.sources` tables |
 | `src/malloy_engine.cpp` | QuickJS runtime and the C++ side of the compile loop |
 | `js/driver.js` | The JavaScript side of the compile loop |
 | `js/malloy-embedded.js` | The Malloy compiler bundle (generated; see `js/BUNDLE_SOURCE`) |
 | `cmake/embed_js.cmake` | Compiles the JavaScript into the extension as byte arrays |
 | `test/sql/malloy.test` | SQL tests; models in `test/models/` |
+| `scripts/run-tests-cli.py` | Runs `test/sql/malloy.test` through the DuckDB CLI, without a full build |
 | `duckdb`, `extension-ci-tools`, `third_party/quickjs` | Submodules |

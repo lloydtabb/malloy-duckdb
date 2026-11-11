@@ -1,4 +1,5 @@
 #include "malloy_engine.hpp"
+#include "malloy_store.hpp"
 
 #include "duckdb/common/file_system.hpp"
 #include "duckdb/common/string_util.hpp"
@@ -112,6 +113,9 @@ string PercentDecode(const string &input) {
 //! goes to DuckDB's file system as is, which serves it when an extension
 //! such as httpfs is loaded.
 string ReadURL(ClientContext &context, const string &url) {
+	if (MalloyStore::IsFileURL(url)) {
+		return MalloyStore::ReadFile(context, url);
+	}
 	string path = url;
 	if (StringUtil::StartsWith(url, "file://")) {
 		path = PercentDecode(url.substr(7));
@@ -296,15 +300,34 @@ Runtime &GetRuntime() {
 
 } // namespace
 
-//! Splits a driver listing: rows on newlines, cells on tabs.
+//! Splits a driver listing: rows on newlines, cells on tabs, with
+//! backslash escapes inside cells (see `cell` in driver.js).
 static vector<vector<string>> ParseListing(const string &listing) {
 	vector<vector<string>> rows;
 	if (listing.empty()) {
 		return rows;
 	}
-	for (auto &line : StringUtil::Split(listing, '\n')) {
-		rows.push_back(StringUtil::Split(line, '\t'));
+	vector<string> row;
+	string cell;
+	for (idx_t i = 0; i < listing.size(); i++) {
+		char c = listing[i];
+		if (c == '\\' && i + 1 < listing.size()) {
+			char e = listing[++i];
+			cell += e == 'n' ? '\n' : e == 't' ? '\t' : e == 'r' ? '\r' : e;
+		} else if (c == '\t') {
+			row.push_back(std::move(cell));
+			cell.clear();
+		} else if (c == '\n') {
+			row.push_back(std::move(cell));
+			cell.clear();
+			rows.push_back(std::move(row));
+			row.clear();
+		} else {
+			cell += c;
+		}
 	}
+	row.push_back(std::move(cell));
+	rows.push_back(std::move(row));
 	return rows;
 }
 
@@ -335,11 +358,17 @@ vector<vector<string>> MalloyEngine::Describe(ClientContext &context, const Mall
 	return ParseListing(rt.Call(&context, "describe", WithModelText({model.url, name}, model)));
 }
 
-vector<vector<string>> MalloyEngine::Define(ClientContext &context, const MalloyModel &model,
-                                           const string &statements) {
+vector<vector<string>> MalloyEngine::Define(ClientContext &context, const string &url, const string &prefix,
+                                           const string &session, const string &statements) {
 	auto &rt = GetRuntime();
 	std::lock_guard<std::recursive_mutex> guard(rt.lock);
-	return ParseListing(rt.Call(&context, "define", {model.url, model.text, statements}));
+	return ParseListing(rt.Call(&context, "define", {url, prefix, session, statements}));
+}
+
+vector<vector<string>> MalloyEngine::Collect(ClientContext &context, const string &url) {
+	auto &rt = GetRuntime();
+	std::lock_guard<std::recursive_mutex> guard(rt.lock);
+	return ParseListing(rt.Call(&context, "collect", {url}));
 }
 
 string MalloyEngine::MalloyVersion() {

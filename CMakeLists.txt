@@ -74,8 +74,9 @@ malloy_embed_js(js/driver.js MALLOY_DRIVER_JS MALLOY_DRIVER_CPP)
 # --- The extension -----------------------------------------------------------
 include_directories(src/include ${QUICKJS_DIR})
 
-set(EXTENSION_SOURCES src/malloy_extension.cpp src/malloy_engine.cpp
-                      ${MALLOY_EMBEDDED_CPP} ${MALLOY_DRIVER_CPP})
+set(EXTENSION_SOURCES
+    src/malloy_extension.cpp src/malloy_engine.cpp src/malloy_statements.cpp
+    src/malloy_store.cpp ${MALLOY_EMBEDDED_CPP} ${MALLOY_DRIVER_CPP})
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

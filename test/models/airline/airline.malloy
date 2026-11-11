@@ -1,0 +1,12 @@
+import '../shared/carrier_names.malloy'
+
+source: airline_flights is duckdb.table('flights') extend {
+  join_one: carrier_names with carrier
+  measure: flight_count is count()
+  view: by_carrier is {
+    group_by: carrier_names.nickname
+    aggregate: flight_count
+  }
+}
+
+query: top_carriers is airline_flights -> by_carrier

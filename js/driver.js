@@ -53,7 +53,9 @@
   }
 
   // Runs one compile to completion. `compile` is a malloyEmbedded function.
-  function drive(compile, request, modelText, session) {
+  // `observe`, if given, is told of every file read ({url, contents}) and
+  // every table described ({table}).
+  function drive(compile, request, modelText, session, observe) {
     const needs = {
       connections: [{name: CONNECTION, dialect: 'duckdb'}],
       files: [],
@@ -69,10 +71,13 @@
       let progress = false;
       for (const file of asked.files || []) {
         const inMemory = typeof modelText === 'string' && file.url === request.model_url;
-        needs.files.push({url: file.url, contents: inMemory ? modelText : host.readURL(file.url)});
+        const text = inMemory ? modelText : host.readURL(file.url);
+        if (observe && !inMemory) observe({url: file.url, contents: text});
+        needs.files.push({url: file.url, contents: text});
         progress = true;
       }
       for (const table of asked.table_schemas || []) {
+        if (observe) observe({table: table.name});
         needs.table_schemas.push({...table, schema: schemaFor(table.name)});
         progress = true;
       }
@@ -96,6 +101,14 @@
   function contents(modelURL, modelText, session) {
     const response = drive(malloy.compileModelContents, {model_url: modelURL}, modelText, session);
     return (response.model && response.model.entries) || [];
+  }
+
+  // A table path naming a file relative to the working directory, such as
+  // data/movies.parquet or 'movies.csv', rather than a table or a URL.
+  function looksLikeRelativeFile(path) {
+    const p = String(path).replace(/^['"]|['"]$/g, '');
+    if (p.startsWith('/') || /^[a-z][a-z0-9+.-]*:\/\//i.test(p) || /^[A-Za-z]:[\\/]/.test(p)) return false;
+    return p.includes('/') || /\.(parquet|csv|tsv|json|jsonl|ndjson|xlsx)$/i.test(p);
   }
 
   function typeName(type) {
@@ -136,9 +149,10 @@
     }
   }
 
-  // Tabs and newlines would break the line-and-tab listing format.
+  // Listings are rows on lines, cells separated by tabs; backslash escapes
+  // keep tabs, newlines and backslashes inside a cell (file contents).
   function cell(text) {
-    return String(text).replace(/[\t\r\n]+/g, ' ');
+    return String(text).replace(/[\\\t\r\n]/g, c => ({'\\': '\\\\', '\t': '\\t', '\r': '\\r', '\n': '\\n'})[c]);
   }
 
   function listing(rows) {
@@ -176,15 +190,41 @@
     },
 
     // Checks that `newText` (import, source:, query: statements) compiles
-    // when appended to the session model `modelText`, and returns rows of
-    // kind, name for what it makes newly visible. Does not change anything:
+    // when added to the session model, and returns rows of kind, name for
+    // what it makes newly visible. The session model is `prefix` (imports of
+    // installed sources it needs) followed by `sessionText`. Changes nothing:
     // the caller appends `newText` to its session model.
-    define(modelURL, modelText, newText) {
-      const before = new Set(contents(modelURL, modelText).map(e => `${e.kind}\t${e.name}`));
-      const combined = modelText ? `${modelText}\n${newText}` : newText;
-      const session = {url: modelURL, newFromLine: modelText ? modelText.split('\n').length : 0};
-      const after = contents(modelURL, combined, session);
+    define(modelURL, prefix, sessionText, newText) {
+      const join = parts => parts.filter(p => p).join('\n');
+      const before = new Set(contents(modelURL, join([prefix, sessionText])).map(e => `${e.kind}\t${e.name}`));
+      const lines = text => (text ? text.split('\n').length : 0);
+      const session = {url: modelURL, newFromLine: lines(prefix) + lines(sessionText)};
+      const after = contents(modelURL, join([prefix, sessionText, newText]), session);
       return listing(after.filter(e => !before.has(`${e.kind}\t${e.name}`)).map(e => [e.kind, e.name]));
+    },
+
+    // Compiles the model file at `modelURL` and lists, one row each:
+    //   file    <url> <contents>   every file the compile read
+    //   entry   <kind> <name>      every source and named query it exports
+    //   warning <message>          a source reading a file by a relative path
+    // For `malloy install` and `malloy check`.
+    collect(modelURL) {
+      const files = [];
+      const warnings = [];
+      const response = drive(malloy.compileModel, {model_url: modelURL}, undefined, undefined, seen => {
+        if (seen.url !== undefined) {
+          files.push(['file', seen.url, seen.contents]);
+        } else if (looksLikeRelativeFile(seen.table)) {
+          warnings.push(['warning', `reads the file ${seen.table} by a relative path, which only works where DuckDB runs in the same directory; for a shared database, load it into a table or use an absolute, s3:// or https:// location`]);
+        }
+      });
+      const translation = (response.translations || []).find(t => t.url === modelURL);
+      const modelDef = translation ? JSON.parse(translation.compiled_model_json) : {contents: {}};
+      const entries = ((response.model && response.model.entries) || []).map(e => {
+        const def = modelDef.contents[e.name];
+        return ['entry', def && def.type === 'query' ? 'query' : e.kind, e.name];
+      });
+      return listing([...files, ...entries, ...warnings]);
     },
   };
 })();
