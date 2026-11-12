@@ -44,5 +44,4 @@ docs:
 
     `LOAD malloy` sets `allow_parser_override_extension` to `fallback` (unless it has
     been set already), so that Malloy statements reach the extension; SQL parses as
-    usual. Run `malloy;` for the commands. Known gap: Malloy time literals and time zones
-    aren't supported yet.
+    usual. Run `malloy;` for the commands.

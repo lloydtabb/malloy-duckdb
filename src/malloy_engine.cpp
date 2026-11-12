@@ -416,7 +416,7 @@ string MalloyModelURL(ClientContext &context, const string &location) {
 	}
 	path = fs.ConvertSeparators(path);
 #ifdef _WIN32
-	StringUtil::ReplaceAll(path, "\\", "/");
+	path = StringUtil::Replace(path, "\\", "/");
 	return "file:///" + path;
 #else
 	return "file://" + path;

@@ -345,6 +345,29 @@ run: airline_flights -> by_carrier;
 ----
 airline_flights
 
+# --- Time literals and filters ---------------------------------------------------------
+
+statement ok
+CREATE TABLE events AS SELECT * FROM (VALUES
+  (TIMESTAMP '2003-01-15 10:00:30'), (TIMESTAMP '2003-02-03 08:00:00'), (TIMESTAMP '2003-04-10 12:00:00')
+) AS t(ts);
+
+query I
+run: duckdb.table('events') -> { where: ts ? @2003-01-15 10:00; aggregate: n is count() };
+----
+1
+
+query I
+run: duckdb.table('events') -> { where: ts ~ f'2003-01 to 2003-03'; aggregate: n is count() };
+----
+2
+
+query II
+run: duckdb.table('events') -> { group_by: q is ts.quarter; aggregate: n is count(); order_by: q };
+----
+2003-01-01 00:00:00	2
+2003-04-01 00:00:00	1
+
 # --- Errors --------------------------------------------------------------------------
 
 statement error
