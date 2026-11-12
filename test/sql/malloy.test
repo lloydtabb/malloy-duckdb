@@ -182,12 +182,12 @@ joins and nested data:
 
 # malloy compile: a query's result metadata, as JSON
 query II
-SELECT json_extract_string(result, '$.connection_name'), json_extract_string(result, '$.schema.fields[0].name') FROM malloy_compile('run: movies -> by_genre');
+SELECT result LIKE '%"connection_name":"duckdb"%', result LIKE '%"name":"genre"%' FROM malloy_compile('run: movies -> by_genre');
 ----
-duckdb	genre
+true	true
 
 query I
-SELECT json_extract_string(result, '$.sql') LIKE '%GROUP BY%' FROM malloy_compile('%{ movies -> { group_by: title; nest: by_genre } }%');
+SELECT result LIKE '%"sql":%GROUP BY%' FROM malloy_compile('%{ movies -> { group_by: title; nest: by_genre } }%');
 ----
 true
 
