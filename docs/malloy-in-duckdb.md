@@ -80,6 +80,11 @@ run: flights -> by_carrier;
 Statements end with `;` in the DuckDB CLI, as in SQL. Malloy's own
 semicolons inside `{ }` are fine.
 
+Nested results (from `nest:`) are DuckDB lists of structs, which the CLI's
+table view prints in one wide column. `.mode jsonlines` prints each row as
+one JSON object instead, nests included. `malloy compile` gives the result's
+shape and annotations, to read alongside it.
+
 ### Get help
 
 ```sql
@@ -155,8 +160,34 @@ own fields.
 malloy describe movies;
 ```
 
-lists every field of a source, the source's own and then everything reached
-through its joins and nested data, with:
+describes a source compactly, one line per field: its own dimensions,
+measures and views, then each join and nested array with the fields it adds.
+Each line has the field's type, its definition if it isn't a column, its
+description after `--`, and its other annotations:
+
+```
+source movies -- Movies, one row per title
+  primary_key: id
+dimensions:
+  decade :: number = floor(released / 10) * 10  -- The decade the movie was released in  # number="####"
+measures:
+  movie_count = count()  -- How many movies
+views:
+  by_genre  -- Movies per genre  # bar_chart
+joins and nested data:
+  credits :: join_many  -- Everyone credited on the movie  e.g. aggregate: n is credits.count()
+    role :: string
+  lead :: join_one  e.g. group_by: lead.id
+    name :: string
+```
+
+Use `.mode list` in the DuckDB CLI so long lines aren't cut off. For
+everything in columns, including a usage sentence and example clauses for
+every field:
+
+```sql
+SELECT * FROM malloy_describe('movies');
+```
 
 | Column | Holds |
 |---|---|
@@ -165,6 +196,7 @@ through its joins and nested data, with:
 | `type` | `string`, `number`, `string[]`, `{name :: string}[]`, `join_one`, `join_many`... |
 | `grain` | Empty for one value per row of the source. Otherwise the `join_many` or nested array the field is per: `credits` for `credits.role` |
 | `description` | The field's description |
+| `annotations` | Its other annotations, as written: `# number="####"`, `#(agent) ...` |
 | `definition` | The Malloy expression that defines it: `count()`, `floor(released / 10) * 10` |
 | `usage` | How a query uses it, in a sentence |
 | `example` | Clauses that use it, ready to paste inside `run: movies -> { ... }` |
@@ -244,6 +276,17 @@ and in the model, `duckdb.table('movies')`. `malloy install` warns when a
 model reads a file by a relative path: its output has a row of kind
 `warning` saying which file.
 
+### In scripts
+
+Each `duckdb` process is a new session, so a script that `malloy import`s a
+model compiles it again every time. Install it into a database file once
+instead, and every later run can use it:
+
+```sh
+duckdb movies.duckdb -c "LOAD malloy; malloy install 'models/imdb.malloy';"
+duckdb movies.duckdb -cmd "LOAD malloy" -c "run: movies -> by_genre;"
+```
+
 ### Sharing with MotherDuck
 
 Installed models are stored in the database, so they travel with it.
@@ -315,7 +358,8 @@ malloy import 'models/imdb.malloy';
 ```
 
 `malloy import` loads a model for this connection only, without installing
-it. Sources in your session take precedence over installed ones with the
+it, and says in one line what it added:
+`imported 2 sources (movies, people), 1 query (top_10)`. Sources in your session take precedence over installed ones with the
 same name, so from here on `movies` means the version on your disk, and
 nobody else sees it.
 
@@ -401,8 +445,9 @@ A statement that starts with one of these is Malloy, not SQL:
 | `malloy` | Lists the commands |
 | `malloy help [<topic>]` | Lists the Malloy help topics, or shows one: `malloy help language/joins`, or just `malloy help joins`. The topics are malloyyo's `yo_help` topics, with the same names. Use `.mode list` in the DuckDB CLI so long lines aren't cut off |
 | `malloy sources` | Lists the sources and named queries you can use: where each comes from, description, primary key, filters, joins, fields |
-| `malloy describe <name>` | Lists every field of a source, through its joins and nested data: path, kind, type, grain, description, definition, usage, example |
+| `malloy describe <name>` | Describes a source compactly: its fields grouped by kind, then its joins and nested data, with definitions, descriptions and annotations. `malloy_describe('<name>')` has it all in columns, with usage and examples |
 | `malloy sql <statement>` | Shows a statement with its Malloy compiled to SQL |
+| `malloy compile <query>` | A query's result metadata as JSON, without running it: its SQL, its output fields (nested ones included) with their annotations, and the query's, source's and model's annotations. Malloy's own result format, without the data. Takes a `run:` statement or a single `%{ }%` |
 | `malloy import '<location>'` | Loads a model into this session only, from your files or a URL |
 | `malloy install '<location>'` | Copies a model and its imports into this database and installs its exported sources |
 | `malloy update` | Installs every model again, from where it was installed from |

@@ -207,8 +207,9 @@ MALLOY_BIND(MalloyHelpBind) {
 	    {"source: ..., query: ...", "Defines a source or named query in this session"},
 	    {"malloy help [<topic>]", "Lists Malloy help topics, or shows one: malloy help language/joins"},
 	    {"malloy sources", "Lists the sources and named queries you can use, with descriptions"},
-	    {"malloy describe <name>", "Lists a source's fields, through its joins, and how to use each"},
+	    {"malloy describe <name>", "A source's fields, grouped, with joins and nested data; malloy_describe() has more"},
 	    {"malloy sql <statement>", "Shows a statement with its Malloy compiled to SQL"},
+	    {"malloy compile <query>", "A query's result metadata as JSON: SQL, output fields and their annotations"},
 	    {"malloy import '<location>'", "Loads a model into this session only"},
 	    {"malloy install '<location>'", "Copies a model into this database and installs its sources"},
 	    {"malloy update", "Installs every model again, from where it was installed from"},
@@ -218,6 +219,8 @@ MALLOY_BIND(MalloyHelpBind) {
 	    {"malloy check '<location>'", "Compiles a model and reports errors, changing nothing"},
 	    {"malloy session", "Lists what this session has imported and defined"},
 	    {"malloy reset", "Clears this session's imports and definitions"},
+	    {".mode jsonlines", "A DuckDB setting: shows each result row as one JSON object, nested results included"},
+	    {"duckdb <file>.duckdb", "For scripts: malloy install into a database file once; every later session can use it"},
 	};
 	return std::move(result);
 }
@@ -260,13 +263,35 @@ MALLOY_BIND(MalloySQLBind) {
 //===--------------------------------------------------------------------===//
 // source: ..., query: ..., malloy import: add to the session model
 //===--------------------------------------------------------------------===//
-static unique_ptr<FunctionData> DefineBind(ClientContext &context, const string &statements,
+//! One line saying what was added: "imported 2 sources (flights, movies),
+//! 1 query (top)". Short enough not to bury a script's real output.
+static string DefinedSummary(const string &verb, const vector<vector<string>> &defined) {
+	std::map<string, vector<string>> by_kind;
+	for (auto &row : defined) {
+		if (row.size() >= 2) {
+			by_kind[row[0]].push_back(row[1]);
+		}
+	}
+	if (by_kind.empty()) {
+		return verb + " nothing new";
+	}
+	vector<string> parts;
+	for (auto &entry : by_kind) {
+		auto count = entry.second.size();
+		auto kind = entry.first == "query" ? (count == 1 ? "query" : "queries") : entry.first + (count == 1 ? "" : "s");
+		auto list = count <= 6 ? " (" + StringUtil::Join(entry.second, ", ") + ")" : string();
+		parts.push_back(StringUtil::Format("%llu %s%s", count, kind, list));
+	}
+	return verb + " " + StringUtil::Join(parts, ", ");
+}
+
+static unique_ptr<FunctionData> DefineBind(ClientContext &context, const string &statements, const string &verb,
                                            vector<LogicalType> &return_types, vector<string> &names) {
 	auto state = GetMalloyState(context);
 	auto prefix = InstalledImports(context, *state, statements);
 	auto defined = MalloyEngine::Define(context, state->url, prefix, state->Text(), statements);
-	auto result = Columns(return_types, names, {"kind", "name"});
-	result->rows = defined;
+	auto result = Columns(return_types, names, {"result"});
+	result->rows.push_back({DefinedSummary(verb, defined)});
 	result->action = [statements, defined](ClientContext &context) {
 		auto state = GetMalloyState(context);
 		state->statements.push_back(statements);
@@ -281,12 +306,13 @@ static unique_ptr<FunctionData> DefineBind(ClientContext &context, const string 
 }
 
 MALLOY_BIND(MalloyDefineBind) {
-	return DefineBind(context, StringArgument(input, "malloy_define", "the Malloy statements"), return_types, names);
+	return DefineBind(context, StringArgument(input, "malloy_define", "the Malloy statements"), "defined",
+	                  return_types, names);
 }
 
 MALLOY_BIND(MalloyImportBind) {
 	auto url = MalloyModelURL(context, StringArgument(input, "malloy_import", "the location"));
-	return DefineBind(context, "import " + KeywordHelper::WriteQuoted(url, '"'), return_types, names);
+	return DefineBind(context, "import " + KeywordHelper::WriteQuoted(url, '"'), "imported", return_types, names);
 }
 
 //===--------------------------------------------------------------------===//
@@ -374,8 +400,41 @@ MALLOY_BIND(MalloyDescribeBind) {
 	if (!known) {
 		throw BinderException("Malloy: no source or query named '%s'; malloy sources lists them", name);
 	}
-	auto result = Columns(return_types, names, {"name", "kind", "type", "grain", "description", "definition", "usage", "example"});
+	auto result = Columns(return_types, names, {"name", "kind", "type", "grain", "description", "annotations", "definition", "usage", "example"});
 	result->rows = MalloyEngine::Describe(context, SessionModel(context, MalloyName(name)), name);
+	return std::move(result);
+}
+
+MALLOY_BIND(MalloyDescribeTextBind) {
+	auto name = StringArgument(input, "malloy_describe_text", "the source name");
+	auto result = Columns(return_types, names, {"line"});
+	result->rows = MalloyEngine::DescribeText(context, SessionModel(context, MalloyName(name)), name);
+	return std::move(result);
+}
+
+//===--------------------------------------------------------------------===//
+// malloy compile <query>
+//===--------------------------------------------------------------------===//
+MALLOY_BIND(MalloyCompileBind) {
+	auto statement = StringArgument(input, "malloy_compile", "the query");
+	string query;
+	if (MalloyIsRunStatement(statement)) {
+		query = statement;
+	} else {
+		// Exactly one %{ query }%, and nothing else.
+		idx_t count = 0;
+		auto rest = MalloyExpandEmbedded(statement, [&](const string &embedded, bool) {
+			count++;
+			query = "run: " + embedded;
+			return string();
+		});
+		StringUtil::Trim(rest);
+		if (count != 1 || !rest.empty()) {
+			throw BinderException("Malloy: malloy compile takes a run: statement or a single %{ query }%");
+		}
+	}
+	auto result = Columns(return_types, names, {"result"});
+	result->rows.push_back({MalloyEngine::Compile(context, SessionModel(context, query), query)});
 	return std::move(result);
 }
 
@@ -594,14 +653,22 @@ static ParserOverrideResult MalloyParserOverride(ParserExtensionInfo *, const st
 	if (sql.empty()) {
 		return ParserOverrideResult();
 	}
+	ParserOptions sql_options = options;
+	sql_options.extensions = decltype(sql_options.extensions)();
 	try {
-		ParserOptions sql_options = options;
-		sql_options.extensions = decltype(sql_options.extensions)();
 		Parser parser(sql_options);
 		parser.ParseQuery(sql);
 		return ParserOverrideResult(std::move(parser.statements));
 	} catch (std::exception &ex) {
-		return ParserOverrideResult(ex);
+		// DuckDB ignores an error from here in 'fallback' mode and reports its
+		// own parser's, which says nothing about the Malloy. Report this one,
+		// as a statement that fails with it.
+		ErrorData error(ex);
+		Parser parser(sql_options);
+		parser.ParseQuery("SELECT * FROM malloy_error(" +
+		                  KeywordHelper::WriteQuoted("could not read this as Malloy and SQL: " + error.RawMessage(), '\'') +
+		                  ")");
+		return ParserOverrideResult(std::move(parser.statements));
 	}
 }
 
@@ -643,6 +710,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	rows("malloy_reset", {}, MalloyResetBind);
 	rows("malloy_sources", {}, MalloySourcesBind);
 	rows("malloy_describe", {text}, MalloyDescribeBind);
+	rows("malloy_describe_text", {text}, MalloyDescribeTextBind);
+	rows("malloy_compile", {text}, MalloyCompileBind);
 	rows("malloy_install", {text}, MalloyInstallBind);
 	rows("malloy_update", {}, MalloyUpdateBind);
 	rows("malloy_uninstall", {text, LogicalType::BOOLEAN}, MalloyUninstallBind);

@@ -270,11 +270,103 @@
           f.type,
           f.grain,
           f.description || '',
+          (f.annotations || []).join(' '),
           f.definition || '',
           f.usage,
           (f.examples || []).join('; '),
         ])
       );
+    },
+
+    // One row per line: a source or named query, compactly. Its own fields
+    // grouped by kind, then each join and nested array with its fields.
+    describeText(modelURL, name, modelText) {
+      const entries = catalog(modelURL, modelText);
+      const entry = entries.find(e => e.name === name);
+      if (!entry) {
+        const known = entries.map(e => e.name).sort().join(', ');
+        throw new Error(`No source or query named '${name}'` + (known ? `; defined: ${known}` : '; nothing is defined yet'));
+      }
+      // One-line annotations go on the field's line; a multi-line one (a
+      // block like #|(agent) ... |#) goes on the lines after it, indented.
+      const oneLine = text => !text.includes('\n');
+      const notes = f => {
+        const parts = [];
+        if (f.description) parts.push(`-- ${f.description}`);
+        for (const a of f.annotations || []) if (oneLine(a)) parts.push(a);
+        return parts.length ? '  ' + parts.join('  ') : '';
+      };
+      const blocks = (f, pad) =>
+        (f.annotations || [])
+          .filter(a => !oneLine(a))
+          .map(a => a.split('\n').map(l => `${pad}  ${l}`).join('\n'));
+      const line = f => {
+        const name = f.path.includes('.') ? f.path.slice(f.path.lastIndexOf('.') + 1) : f.path;
+        let text = name;
+        if (f.kind === 'dimension' || f.kind === 'calculation') text += ` :: ${f.type}`;
+        if (f.definition) text += ` = ${f.definition.replace(/\s+/g, ' ')}`;
+        return text + notes(f);
+      };
+      const lines = [];
+      lines.push(`${entry.kind} ${entry.name}${entry.description ? ' -- ' + entry.description : ''}`);
+      for (const a of entry.annotations || []) {
+        for (const l of a.split('\n')) lines.push(`  ${l}`);
+      }
+      if (entry.primary_key) lines.push(`  primary_key: ${entry.primary_key}`);
+      for (const f of entry.filters || []) lines.push(`  where: ${f}`);
+      for (const p of entry.parameters || []) lines.push(`  parameter: ${p}`);
+
+      const own = entry.fields.filter(f => !f.path.includes('.'));
+      const sections = entry.kind === 'query'
+        ? [['columns', own]]
+        : [
+            ['dimensions', own.filter(f => f.kind === 'dimension')],
+            ['measures', own.filter(f => f.kind === 'measure')],
+            ['calculations', own.filter(f => f.kind === 'calculation')],
+            ['views', own.filter(f => f.kind === 'view')],
+          ];
+      for (const [title, fields] of sections) {
+        if (!fields.length) continue;
+        lines.push(`${title}:`);
+        for (const f of fields) lines.push(`  ${line(f)}`, ...blocks(f, '  '));
+      }
+
+      // Joins and nested arrays as a tree: each with its fields, then the
+      // joins and arrays inside it.
+      const isNested = f => f.kind === 'join' || /\[\]$/.test(f.type);
+      const parentOf = path => (path.includes('.') ? path.slice(0, path.lastIndexOf('.')) : '');
+      const nested = entry.fields.filter(isNested);
+      const emit = (parent, depth) => {
+        for (const n of nested.filter(f => parentOf(f.path) === parent)) {
+          const pad = '  '.repeat(depth);
+          const kind = n.kind === 'join' ? n.type : `${n.type} (nested)`;
+          const example = (n.examples || [])[0];
+          lines.push(`${pad}${n.path} :: ${kind}${notes(n)}${example ? `  e.g. ${example}` : ''}`, ...blocks(n, pad));
+          for (const f of entry.fields) {
+            if (parentOf(f.path) !== n.path || isNested(f)) continue;
+            lines.push(`${pad}  ${line(f)}`, ...blocks(f, pad + '  '));
+          }
+          emit(n.path, depth + 1);
+        }
+      };
+      if (nested.length) {
+        lines.push('joins and nested data:');
+        emit('', 1);
+      }
+      return listing(lines.map(l => [l]));
+    },
+
+    // A query's result metadata, as JSON, without running it: its SQL, its
+    // output schema (nested fields included, each with its annotations), and
+    // the query's, source's and model's annotations. Malloy's own Result
+    // shape, without the data.
+    compile(modelURL, queryText, modelText) {
+      const response = drive(malloy.compileQuery, {model_url: modelURL, query_malloy: queryText}, modelText);
+      if (!response.result) {
+        throw new Error('Malloy produced no result for this query');
+      }
+      const {data, ...result} = response.result;
+      return JSON.stringify(result);
     },
 
     // Checks that `newText` (import, source:, query: statements) compiles

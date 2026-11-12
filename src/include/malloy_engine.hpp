@@ -32,8 +32,8 @@ public:
 	static vector<vector<string>> ListSources(ClientContext &context, const MalloyModel &model);
 
 	//! The fields of the source or named query `name`, through its joins and
-	//! nested data: (path, kind, type, grain, description, definition, usage,
-	//! example).
+	//! nested data: (path, kind, type, grain, description, annotations,
+	//! definition, usage, example).
 	static vector<vector<string>> Describe(ClientContext &context, const MalloyModel &model, const string &name);
 
 	//! Checks that `statements` compile when added to the session model
@@ -46,6 +46,13 @@ public:
 	//! Compiles the model file at `url`. Rows: (file, url, contents) for every
 	//! file read, (entry, kind, name) for every export, (warning, message).
 	static vector<vector<string>> Collect(ClientContext &context, const string &url);
+
+	//! `name` described compactly, one row per line.
+	static vector<vector<string>> DescribeText(ClientContext &context, const MalloyModel &model, const string &name);
+
+	//! A query's result metadata as JSON: SQL, output schema with
+	//! annotations, and the query's, source's and model's annotations.
+	static string Compile(ClientContext &context, const MalloyModel &model, const string &query);
 
 	//! Help topics (malloyyo's yo_help topics): (topic, about) rows.
 	static vector<vector<string>> HelpTopics();

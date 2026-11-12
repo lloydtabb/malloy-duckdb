@@ -74,10 +74,10 @@ No help topic matches
 
 # --- The session model --------------------------------------------------------
 
-query II
+query I
 malloy import 'test/models/flights.malloy';
 ----
-source	flights
+imported 1 source (flights)
 
 query III
 run: flights -> by_carrier + { order_by: nickname };
@@ -106,15 +106,15 @@ SELECT sql LIKE 'SELECT nickname FROM (SELECT %' FROM malloy_sql('SELECT nicknam
 ----
 true
 
-query II
+query I
 source: long_flights is flights extend { where: distance > 150 };
 ----
-source	long_flights
+defined 1 source (long_flights)
 
-query II
+query I
 query: busy is flights -> by_carrier;
 ----
-query	busy
+defined 1 query (busy)
 
 query I
 run: long_flights -> { aggregate: flight_count };
@@ -146,10 +146,10 @@ long_flights	source	session
 
 # --- describe and nested types -------------------------------------------------
 
-query II
+query I
 malloy import 'test/models/movies.malloy';
 ----
-source	movies
+imported 1 source (movies)
 
 query IIII
 SELECT name, kind, type, grain FROM malloy_describe('movies');
@@ -170,6 +170,36 @@ SELECT definition, example FROM malloy_describe('movies') WHERE name = 'movie_co
 ----
 count()	aggregate: movie_count
 
+# malloy describe: compact, one line per field, grouped
+query I
+SELECT line FROM malloy_describe_text('movies') WHERE line IN ('source movies', 'measures:', '  movie_count = count()', 'joins and nested data:', '    each :: string');
+----
+source movies
+measures:
+  movie_count = count()
+joins and nested data:
+    each :: string
+
+# malloy compile: a query's result metadata, as JSON
+query II
+SELECT json_extract_string(result, '$.connection_name'), json_extract_string(result, '$.schema.fields[0].name') FROM malloy_compile('run: movies -> by_genre');
+----
+duckdb	genre
+
+query I
+SELECT json_extract_string(result, '$.sql') LIKE '%GROUP BY%' FROM malloy_compile('%{ movies -> { group_by: title; nest: by_genre } }%');
+----
+true
+
+statement error
+SELECT * FROM malloy_compile('SELECT 1');
+----
+malloy compile takes a run: statement
+
+# A run: after malloy sql / malloy compile may hold semicolons in its braces
+statement ok
+malloy sql run: movies -> { group_by: title; aggregate: movie_count };
+
 query II
 run: movies -> by_genre + { order_by: genre };
 ----
@@ -186,7 +216,7 @@ Scott	2
 statement error
 malloy describe nope;
 ----
-no source or query named 'nope'
+named 'nope'
 
 statement ok
 malloy reset;
@@ -250,10 +280,10 @@ American	2
 United	1
 
 # A session definition built on an installed source
-query II
+query I
 source: aa_flights is airline_flights extend { where: carrier = 'AA' };
 ----
-source	aa_flights
+defined 1 source (aa_flights)
 
 query I
 run: aa_flights -> { aggregate: flight_count };

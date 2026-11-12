@@ -374,6 +374,19 @@ vector<vector<string>> MalloyEngine::Collect(ClientContext &context, const strin
 	return ParseListing(rt.Call(&context, "collect", {url}));
 }
 
+vector<vector<string>> MalloyEngine::DescribeText(ClientContext &context, const MalloyModel &model,
+                                                 const string &name) {
+	auto &rt = GetRuntime();
+	std::lock_guard<std::recursive_mutex> guard(rt.lock);
+	return ParseListing(rt.Call(&context, "describeText", WithModelText({model.url, name}, model)));
+}
+
+string MalloyEngine::Compile(ClientContext &context, const MalloyModel &model, const string &query) {
+	auto &rt = GetRuntime();
+	std::lock_guard<std::recursive_mutex> guard(rt.lock);
+	return rt.Call(&context, "compile", WithModelText({model.url, query}, model));
+}
+
 vector<vector<string>> MalloyEngine::HelpTopics() {
 	auto &rt = GetRuntime();
 	std::lock_guard<std::recursive_mutex> guard(rt.lock);

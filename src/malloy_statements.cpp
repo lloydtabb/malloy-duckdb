@@ -107,7 +107,16 @@ StatementKind Classify(const string &text, idx_t pos, bool &command_takes_sql) {
 	}
 	if (word == "malloy" && (next >= text.size() || IsWordStart(text[next]) || text[next] == ';')) {
 		auto sub = WordAt(text, pos);
-		command_takes_sql = sub == "sql";
+		// `malloy sql` and `malloy compile` take a statement: SQL, unless it is
+		// a Malloy statement (run: ...), whose braces may hold semicolons.
+		if (sub == "sql" || sub == "compile") {
+			auto rest = pos;
+			auto word = WordAt(text, rest);
+			auto colon = SkipNoise(text, rest);
+			bool malloy = (word == "run" || word == "source" || word == "query") && colon < text.size() &&
+			              text[colon] == ':';
+			command_takes_sql = !malloy;
+		}
 		return StatementKind::COMMAND;
 	}
 	return StatementKind::SQL;
@@ -255,12 +264,12 @@ string CommandSQL(const string &statement) {
 		return "SELECT * FROM malloy_help_topic(" + Quote(topic) + ")";
 	}
 
-	if (command == "sql") {
+	if (command == "sql" || command == "compile") {
 		auto rest = Trim(statement.substr(pos));
 		if (rest.empty()) {
-			return usage("malloy sql needs a statement", "malloy sql <statement>");
+			return usage("malloy " + command + " needs a statement", "malloy " + command + " <statement>");
 		}
-		return "SELECT * FROM malloy_sql(" + Quote(rest) + ")";
+		return "SELECT * FROM malloy_" + command + "(" + Quote(rest) + ")";
 	}
 
 	string value;
@@ -272,7 +281,7 @@ string CommandSQL(const string &statement) {
 		if (!has_argument || extra) {
 			return usage("malloy describe needs one source name", "malloy describe <name>");
 		}
-		return "SELECT * FROM malloy_describe(" + Quote(value) + ")";
+		return "SELECT * FROM malloy_describe_text(" + Quote(value) + ")";
 	}
 	if (command == "uninstall") {
 		if (!has_argument || extra) {
