@@ -1,0 +1,48 @@
+# Draft of extensions/malloy/description.yml for a pull request to
+# duckdb/community-extensions. Not submitted yet: fill in `ref` with the
+# commit that passed CI on every platform, and `excluded_platforms` with any
+# that can't be supported.
+extension:
+  name: malloy
+  description: Query with Malloy, a semantic modeling and query language, inside DuckDB SQL
+  version: 0.2.0
+  language: C++
+  build: cmake
+  license: MIT
+  excluded_platforms: ""
+  maintainers:
+    - lloydtabb
+
+repo:
+  github: lloydtabb/malloy-duckdb
+  ref: <commit on main that passed CI against DuckDB v2.0.0>
+
+docs:
+  hello_world: |
+    CREATE TABLE flights AS
+      SELECT * FROM 'https://raw.githubusercontent.com/malloydata/malloy-samples/main/data/flights.parquet';
+    run: duckdb.table('flights') -> {
+      group_by: carrier
+      aggregate: flight_count is count(), total_distance is distance.sum()
+      limit: 5
+    };
+    SELECT * FROM %{ duckdb.table('flights') -> { group_by: origin; aggregate: n is count() } }% WHERE n > 1000;
+  extended_description: |
+    Use [Malloy](https://www.malloydata.dev) inside DuckDB. Malloy describes data
+    relationships (joins, measures, nested data) once, in a model, and compiles queries
+    to SQL; this extension runs the Malloy compiler inside DuckDB, so Malloy and SQL mix
+    freely.
+
+    - `run: ...` runs a Malloy query; `%{ ... }%` puts one inside SQL, anywhere a table
+      can go.
+    - `malloy install 'model.malloy'` copies a model, and every file it imports, into the
+      database, so anyone who opens it can query its sources. `malloy import` loads one
+      for the current session only, for testing changes.
+    - `malloy sources` and `malloy describe <source>` show what can be queried, with
+      descriptions, annotations, joins and nested data; `malloy help` has the language
+      reference.
+
+    `LOAD malloy` sets `allow_parser_override_extension` to `fallback` (unless it has
+    been set already), so that Malloy statements reach the extension; SQL parses as
+    usual. Run `malloy;` for the commands. Known gap: Malloy time literals and time zones
+    aren't supported yet.

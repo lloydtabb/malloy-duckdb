@@ -97,8 +97,8 @@ The quick way builds only the extension, not DuckDB, and downloads the
 official DuckDB CLI of the matching version to load it into:
 
 ```sh
-git clone --recurse-submodules https://github.com/lloydtabb/malloy-duckkdb
-cd malloy-duckkdb
+git clone --recurse-submodules https://github.com/lloydtabb/malloy-duckdb
+cd malloy-duckdb
 scripts/quick-build.sh
 build/duckdb-cli/duckdb -unsigned
 ```
@@ -108,7 +108,7 @@ LOAD 'build/release/extension/malloy/malloy.duckdb_extension';
 ```
 
 On macOS, give `LOAD` an absolute path, e.g.
-`LOAD '/path/to/malloy-duckkdb/build/release/extension/malloy/malloy.duckdb_extension';`.
+`LOAD '/path/to/malloy-duckdb/build/release/extension/malloy/malloy.duckdb_extension';`.
 The official CLI is a hardened binary, and macOS refuses to `dlopen` a
 relative path from one ("relative path not allowed in hardened program").
 `scripts/quick-build.sh` prints the absolute path to use.
