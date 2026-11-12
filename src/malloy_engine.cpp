@@ -20,6 +20,8 @@ extern const unsigned char MALLOY_EMBEDDED_JS[];
 extern const size_t MALLOY_EMBEDDED_JS_LEN;
 extern const unsigned char MALLOY_DRIVER_JS[];
 extern const size_t MALLOY_DRIVER_JS_LEN;
+extern const unsigned char MALLOY_HELP_JS[];
+extern const size_t MALLOY_HELP_JS_LEN;
 
 namespace duckdb {
 
@@ -209,6 +211,7 @@ public:
 		JS_FreeValue(ctx, global);
 
 		Eval(reinterpret_cast<const char *>(MALLOY_EMBEDDED_JS), MALLOY_EMBEDDED_JS_LEN, "malloy-embedded.js");
+		Eval(reinterpret_cast<const char *>(MALLOY_HELP_JS), MALLOY_HELP_JS_LEN, "help-content.js");
 		Eval(reinterpret_cast<const char *>(MALLOY_DRIVER_JS), MALLOY_DRIVER_JS_LEN, "driver.js");
 	}
 
@@ -369,6 +372,18 @@ vector<vector<string>> MalloyEngine::Collect(ClientContext &context, const strin
 	auto &rt = GetRuntime();
 	std::lock_guard<std::recursive_mutex> guard(rt.lock);
 	return ParseListing(rt.Call(&context, "collect", {url}));
+}
+
+vector<vector<string>> MalloyEngine::HelpTopics() {
+	auto &rt = GetRuntime();
+	std::lock_guard<std::recursive_mutex> guard(rt.lock);
+	return ParseListing(rt.Call(optional_ptr<ClientContext>(), "helpTopics", {}));
+}
+
+vector<vector<string>> MalloyEngine::HelpTopic(const string &query) {
+	auto &rt = GetRuntime();
+	std::lock_guard<std::recursive_mutex> guard(rt.lock);
+	return ParseListing(rt.Call(optional_ptr<ClientContext>(), "helpTopic", {query}));
 }
 
 string MalloyEngine::MalloyVersion() {

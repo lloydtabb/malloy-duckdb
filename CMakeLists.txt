@@ -70,13 +70,14 @@ function(malloy_embed_js input symbol output_var)
 endfunction()
 malloy_embed_js(js/malloy-embedded.js MALLOY_EMBEDDED_JS MALLOY_EMBEDDED_CPP)
 malloy_embed_js(js/driver.js MALLOY_DRIVER_JS MALLOY_DRIVER_CPP)
+malloy_embed_js(js/help-content.js MALLOY_HELP_JS MALLOY_HELP_CPP)
 
 # --- The extension -----------------------------------------------------------
 include_directories(src/include ${QUICKJS_DIR})
 
 set(EXTENSION_SOURCES
     src/malloy_extension.cpp src/malloy_engine.cpp src/malloy_statements.cpp
-    src/malloy_store.cpp ${MALLOY_EMBEDDED_CPP} ${MALLOY_DRIVER_CPP})
+    src/malloy_store.cpp ${MALLOY_EMBEDDED_CPP} ${MALLOY_DRIVER_CPP} ${MALLOY_HELP_CPP})
 
 build_static_extension(${TARGET_NAME} ${EXTENSION_SOURCES})
 build_loadable_extension(${TARGET_NAME} " " ${EXTENSION_SOURCES})

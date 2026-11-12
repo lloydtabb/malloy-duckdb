@@ -86,7 +86,8 @@ semicolons inside `{ }` are fine.
 malloy;
 ```
 
-This lists the `malloy` commands.
+This lists the `malloy` commands. `malloy help` lists Malloy help topics,
+the same ones as malloyyo's `yo_help`, and `malloy help <topic>` shows one.
 
 ## Installing your Malloy model
 
@@ -398,6 +399,7 @@ A statement that starts with one of these is Malloy, not SQL:
 | Command | Does |
 |---|---|
 | `malloy` | Lists the commands |
+| `malloy help [<topic>]` | Lists the Malloy help topics, or shows one: `malloy help language/joins`, or just `malloy help joins`. The topics are malloyyo's `yo_help` topics, with the same names. Use `.mode list` in the DuckDB CLI so long lines aren't cut off |
 | `malloy sources` | Lists the sources and named queries you can use: where each comes from, description, primary key, filters, joins, fields |
 | `malloy describe <name>` | Lists every field of a source, through its joins and nested data: path, kind, type, grain, description, definition, usage, example |
 | `malloy sql <statement>` | Shows a statement with its Malloy compiled to SQL |

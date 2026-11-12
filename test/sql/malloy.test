@@ -49,6 +49,29 @@ SELECT count(*) > 10 FROM malloy_help();
 ----
 true
 
+# --- Help topics (malloyyo's yo_help topics) ---------------------------------------
+
+query I
+SELECT count(*) > 10 FROM malloy_help_topics() WHERE topic LIKE 'language/%';
+----
+true
+
+# A topic by part of its name; its name comes first
+query I
+SELECT help FROM malloy_help_topic('joins') LIMIT 1;
+----
+language/joins
+
+query I
+SELECT count(*) > 5 FROM malloy_help_topic('language/aggregate-locality-symmetric-aggregates');
+----
+true
+
+statement error
+malloy help no_such_topic_anywhere;
+----
+No help topic matches
+
 # --- The session model --------------------------------------------------------
 
 query II

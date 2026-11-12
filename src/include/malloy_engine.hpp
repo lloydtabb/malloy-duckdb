@@ -47,6 +47,12 @@ public:
 	//! file read, (entry, kind, name) for every export, (warning, message).
 	static vector<vector<string>> Collect(ClientContext &context, const string &url);
 
+	//! Help topics (malloyyo's yo_help topics): (topic, about) rows.
+	static vector<vector<string>> HelpTopics();
+	//! One help topic, found by name, part of a name, or words in its text:
+	//! its name, then one row per line.
+	static vector<vector<string>> HelpTopic(const string &query);
+
 	//! The Malloy version the bundle was built from.
 	static string MalloyVersion();
 };

@@ -128,7 +128,87 @@
     return rows.map(row => row.map(cell).join('\t')).join('\n');
   }
 
+  // ── help topics: malloyyo's yo_help topics (js/help-content.js) ─────────
+  // Ported from malloyyo packages/mcp-engine/src/help.ts, so topic names and
+  // lookup match yo_help: a topic's name is its path, and the language
+  // reference is split on its `## ` headings into language/<heading>.
+  const LANGUAGE_REFERENCE = 'language/malloy-language-reference.md';
+
+  function slugify(text) {
+    return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  }
+
+  function stripHeader(raw) {
+    const text = raw.replace(/^<!--[\s\S]*?-->\s*\n/, '');
+    const m = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(text);
+    if (!m) return {description: '', body: text};
+    const d = /^description:\s*(.+)$/m.exec(m[1]);
+    return {description: d ? d[1].trim() : '', body: m[2]};
+  }
+
+  let helpTopics = null;
+  function topics() {
+    if (helpTopics) return helpTopics;
+    helpTopics = [];
+    const files = globalThis.malloyHelpContent || {};
+    for (const key of Object.keys(files)) {
+      const name = key.replace(/\.md$/, '').split('/').map(slugify).join('/');
+      if (key !== LANGUAGE_REFERENCE) {
+        const {description, body} = stripHeader(files[key]);
+        helpTopics.push({name, description, body: body.trim()});
+        continue;
+      }
+      // Split the reference into sections; the preamble is language/overview.
+      let section = 'language/overview';
+      let title = 'Malloy language reference: overview';
+      let lines = [];
+      const flush = () => {
+        const body = lines.join('\n').trim();
+        if (body) helpTopics.push({name: section, description: title, body});
+        lines = [];
+      };
+      for (const line of stripHeader(files[key]).body.split('\n')) {
+        const m = /^## (?!# )(.+)$/.exec(line);
+        if (m) {
+          flush();
+          section = 'language/' + slugify(m[1].trim());
+          title = m[1].trim();
+          continue;
+        }
+        lines.push(line);
+      }
+      flush();
+    }
+    return helpTopics;
+  }
+
+  // Exact name, then a name containing it (`joins` finds language/joins),
+  // then a topic whose text contains every word.
+  function findTopic(query) {
+    const q = query.toLowerCase().trim();
+    const all = topics();
+    const direct = all.find(t => t.name === q) || all.find(t => t.name.includes(q));
+    if (direct) return direct;
+    const words = q.split(/\s+/).filter(Boolean);
+    return words.length ? all.find(t => words.every(w => t.body.toLowerCase().includes(w))) : undefined;
+  }
+
   globalThis.malloyDuckDB = {
+    // Rows of topic, about: every help topic.
+    helpTopics() {
+      return listing(topics().map(t => [t.name, t.description]));
+    },
+
+    // Rows of one line each: the topic's text, its name first.
+    helpTopic(query) {
+      const topic = findTopic(query);
+      if (!topic) {
+        throw new Error(`No help topic matches '${query}'; malloy help lists them`);
+      }
+      return listing([[topic.name], ...topic.body.split('\n').map(line => [line])]);
+    },
+
+
     getVersion() {
       return malloy.version;
     },

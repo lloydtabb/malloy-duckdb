@@ -230,7 +230,6 @@ string CommandSQL(const string &statement) {
 		const char *function;
 	};
 	static const Plain plain[] = {{"", "malloy_help"},
-	                              {"help", "malloy_help"},
 	                              {"sources", "malloy_sources"},
 	                              {"update", "malloy_update"},
 	                              {"session", "malloy_session"},
@@ -242,6 +241,18 @@ string CommandSQL(const string &statement) {
 			}
 			return StringUtil::Format("SELECT * FROM %s()", p.function);
 		}
+	}
+
+	if (command == "help") {
+		// The rest is a topic: language/joins, joins, or words to search for.
+		auto topic = Trim(statement.substr(pos));
+		if (topic.size() >= 2 && (topic[0] == '\'' || topic[0] == '"') && topic.back() == topic[0]) {
+			topic = topic.substr(1, topic.size() - 2);
+		}
+		if (topic.empty()) {
+			return "SELECT * FROM malloy_help_topics()";
+		}
+		return "SELECT * FROM malloy_help_topic(" + Quote(topic) + ")";
 	}
 
 	if (command == "sql") {

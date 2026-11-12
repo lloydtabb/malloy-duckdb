@@ -204,6 +204,7 @@ MALLOY_BIND(MalloyHelpBind) {
 	    {"run: <query>", "Runs a Malloy query"},
 	    {"%{ <query> }%", "A Malloy query inside SQL, anywhere a table can go"},
 	    {"source: ..., query: ...", "Defines a source or named query in this session"},
+	    {"malloy help [<topic>]", "Lists Malloy help topics, or shows one: malloy help language/joins"},
 	    {"malloy sources", "Lists the sources and named queries you can use, with descriptions"},
 	    {"malloy describe <name>", "Lists a source's fields, through its joins, and how to use each"},
 	    {"malloy sql <statement>", "Shows a statement with its Malloy compiled to SQL"},
@@ -217,6 +218,21 @@ MALLOY_BIND(MalloyHelpBind) {
 	    {"malloy session", "Lists what this session has imported and defined"},
 	    {"malloy reset", "Clears this session's imports and definitions"},
 	};
+	return std::move(result);
+}
+
+//===--------------------------------------------------------------------===//
+// malloy help [<topic>]: malloyyo's yo_help topics
+//===--------------------------------------------------------------------===//
+MALLOY_BIND(MalloyHelpTopicsBind) {
+	auto result = Columns(return_types, names, {"topic", "about"});
+	result->rows = MalloyEngine::HelpTopics();
+	return std::move(result);
+}
+
+MALLOY_BIND(MalloyHelpTopicBind) {
+	auto result = Columns(return_types, names, {"help"});
+	result->rows = MalloyEngine::HelpTopic(StringArgument(input, "malloy_help_topic", "the topic"));
 	return std::move(result);
 }
 
@@ -617,6 +633,8 @@ static void LoadInternal(ExtensionLoader &loader) {
 	};
 	auto text = LogicalType::VARCHAR;
 	rows("malloy_help", {}, MalloyHelpBind);
+	rows("malloy_help_topics", {}, MalloyHelpTopicsBind);
+	rows("malloy_help_topic", {text}, MalloyHelpTopicBind);
 	rows("malloy_sql", {text}, MalloySQLBind);
 	rows("malloy_define", {text}, MalloyDefineBind);
 	rows("malloy_import", {text}, MalloyImportBind);
