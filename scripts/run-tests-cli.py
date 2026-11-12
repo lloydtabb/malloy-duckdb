@@ -31,6 +31,8 @@ for block in open(test).read().split('\n\n'):
     if '----' in body:
         i = body.index('----')
         sql, expected = '\n'.join(body[:i]), body[i + 1:]
+        while expected and not expected[-1]:
+            expected.pop()
     else:
         sql, expected = '\n'.join(body), None
     records.append((' '.join(head[:2]), sql, expected))
@@ -39,10 +41,26 @@ script = ['.mode list', '.headers off', ".separator '\t'", '.bail off', '.nullva
 for n, (kind, sql, _) in enumerate(records):
     script.append(f'.print ###{n}')
     script.append(sql.rstrip().rstrip(';') + ';')
+# DuckDB 2.0's CLI changes its output for AI agents when AI_AGENT is set.
+env = {k: v for k, v in os.environ.items() if k != 'AI_AGENT'}
 out = subprocess.run(f"'{cli}' -unsigned 2>&1", shell=True, input='\n'.join(script) + '\n',
-                     capture_output=True, text=True, cwd=root).stdout
+                     capture_output=True, text=True, cwd=root, env=env).stdout
 segments = re.split(r'^###(\d+)$', out, flags=re.M)
 results = {int(segments[i]): segments[i + 1].strip('\n') for i in range(1, len(segments), 2)}
+
+
+def as_text(output):
+    # DuckDB 2.0's CLI writes errors as JSON when its output isn't a terminal;
+    # turn one back into the usual "<Type> Error: <message>".
+    import json
+    try:
+        error = json.loads(output)
+        return f"{error['exception_type']} Error: {error['exception_message']}"
+    except (ValueError, KeyError, TypeError):
+        return output
+
+
+results = {n: as_text(text) for n, text in results.items()}
 
 failures = 0
 for n, (kind, sql, expected) in enumerate(records):

@@ -40,7 +40,7 @@ AA	2
 UA	1
 
 query I
-SELECT malloy_version IS NOT NULL FROM malloy_version();
+SELECT version LIKE '0.%' FROM malloy_version();
 ----
 true
 
@@ -372,12 +372,3 @@ query I
 SELECT count(*) FROM flights;
 ----
 3
-
-# With the override turned off, Malloy statements explain how to turn it on
-statement ok
-SET allow_parser_override_extension = 'default';
-
-statement error
-run: flights -> by_carrier
-----
-allow_parser_override_extension

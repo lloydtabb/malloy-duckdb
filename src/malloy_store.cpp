@@ -26,7 +26,7 @@ void Check(QueryResult &result) {
 	}
 }
 
-unique_ptr<MaterializedQueryResult> Run(Connection &con, const string &sql) {
+unique_ptr<QueryResult> Run(Connection &con, const string &sql) {
 	auto result = con.Query(sql);
 	Check(*result);
 	return result;
@@ -39,19 +39,20 @@ unique_ptr<QueryResult> Execute(Connection &con, const string &sql, ARGS... args
 		throw IOException("malloy: %s", prepared->GetError());
 	}
 	vector<Value> values {args...};
-	// Materialized, not streamed: callers read the rows after this returns.
-	auto result = prepared->Execute(values, false);
+	auto result = prepared->Execute(values);
 	Check(*result);
 	return result;
 }
 
 vector<vector<string>> Rows(QueryResult &result) {
 	vector<vector<string>> rows;
-	auto &materialized = result.Cast<MaterializedQueryResult>();
-	for (idx_t row = 0; row < materialized.RowCount(); row++) {
+	auto count = result.RowCount(); // materializes the result
+	auto columns = result.ColumnCount();
+	auto collection = result.Collection().GetRows();
+	for (idx_t row = 0; row < count; row++) {
 		vector<string> cells;
-		for (idx_t col = 0; col < materialized.ColumnCount(); col++) {
-			auto value = materialized.GetValue(col, row);
+		for (idx_t col = 0; col < columns; col++) {
+			auto value = collection.GetValue(col, row);
 			cells.push_back(value.IsNull() ? string() : value.ToString());
 		}
 		rows.push_back(std::move(cells));
@@ -129,7 +130,7 @@ void DeleteModelFilesIfUnused(Connection &con, const string &catalog, const stri
 } // namespace
 
 string MalloyStore::CurrentCatalog(ClientContext &context) {
-	return DatabaseManager::GetDefaultDatabase(context);
+	return DatabaseManager::GetDefaultDatabase(context).GetIdentifierName();
 }
 
 vector<InstalledSource> MalloyStore::List(ClientContext &context) {

@@ -4,8 +4,7 @@ A DuckDB extension for using [Malloy](https://www.malloydata.dev) inside
 DuckDB SQL. Install a Malloy model into a database, and anyone who opens it
 can query the model's sources.
 
-> **Status: early prototype.** Works against DuckDB v1.5.6 on Linux and
-> macOS; see [Status](#status).
+> **Status: early prototype.** For DuckDB v2.0.0; see [Status](#status).
 
 ```sql
 LOAD malloy;
@@ -66,8 +65,8 @@ engine written in C, and runs the compiler in it as one bundled script
 
 ## Status
 
-Early prototype. Built and tested against the official DuckDB v1.5.6 CLI
-on Linux x86-64 and macOS arm64; other platforms not yet tried.
+Early prototype. Tested against the official DuckDB v2.0.0 CLI on macOS
+arm64; CI builds it for every DuckDB platform.
 
 Compile speed in QuickJS, on 4 cores with the two-file flights model:
 
@@ -89,8 +88,8 @@ Known gaps:
 - A Malloy statement in the same script as the `LOAD malloy` before it
   (for example in one `duckdb -c '...'`) is a syntax error: DuckDB parses
   the whole script before the extension loads. Use `-cmd` for the `LOAD`.
-- CI (`.github/workflows/MainDistributionPipeline.yml`) builds
-  `linux_amd64` and `osx_arm64` only.
+- With `allow_parser_override_extension` set back to `default`, DuckDB 2.0
+  parses `run: ...` as SQL, so the error doesn't say how to turn Malloy back on.
 
 ## Building
 
@@ -116,7 +115,7 @@ relative path from one ("relative path not allowed in hardened program").
 
 `-unsigned` is needed because the build isn't signed by DuckDB. The
 extension only loads into the exact DuckDB version it was built against
-(v1.5.6, the `duckdb` submodule).
+(v2.0.0, the `duckdb` submodule). Version 0.1 of this extension, for DuckDB v1.5, is the `v1.5` branch.
 
 To run the SQL tests against that CLI, without a full build:
 

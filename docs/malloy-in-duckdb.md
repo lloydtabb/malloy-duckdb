@@ -1,7 +1,7 @@
 # Malloy in DuckDB
 
 > **Status: early prototype.** Everything here is implemented and tested
-> against DuckDB v1.5.6 on Linux and macOS. Not yet tried with MotherDuck
+> against DuckDB v2.0.0 on macOS. Not yet tried with MotherDuck
 > beyond a simple query. Building and loading the extension are in the
 > [README](../README.md).
 
@@ -22,7 +22,7 @@ SQL stays in charge. Malloy goes wherever a table could, between `%{` and
 
 ### Load the extension
 
-Start DuckDB (v1.5.6) and load the extension:
+Start DuckDB (v2.0.0) and load the extension:
 
 ```sql
 LOAD malloy;

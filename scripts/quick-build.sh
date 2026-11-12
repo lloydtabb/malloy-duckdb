@@ -20,21 +20,24 @@ if [ ! -f build/release/build.ninja ]; then
   cmake -G Ninja -DEXTENSION_STATIC_BUILD=1 \
     -DDUCKDB_EXTENSION_CONFIGS="$ROOT/extension_config.cmake" \
     -DENABLE_EXTENSION_AUTOLOADING=0 -DENABLE_EXTENSION_AUTOINSTALL=0 \
+    -DOVERRIDE_GIT_DESCRIBE="$VERSION" \
     -DCMAKE_BUILD_TYPE=Release -S ./duckdb/ -B build/release
 fi
+# The extension is stamped with this version, which LOAD checks.
 ninja -C build/release malloy_loadable_extension
 
 if [ ! -x build/duckdb-cli/duckdb ]; then
   case "$(uname -s)-$(uname -m)" in
-    Linux-x86_64) ASSET=duckdb_cli-linux-amd64.zip ;;
-    Linux-aarch64) ASSET=duckdb_cli-linux-arm64.zip ;;
-    Darwin-*) ASSET=duckdb_cli-osx-universal.zip ;;
+    Linux-x86_64) PLATFORM=linux-amd64 ;;
+    Linux-aarch64) PLATFORM=linux-arm64 ;;
+    Darwin-*) PLATFORM=osx-universal ;;
     *) echo "No prebuilt DuckDB CLI known for $(uname -s)-$(uname -m)" >&2; exit 1 ;;
   esac
   mkdir -p build/duckdb-cli
-  curl -sSfL -o build/duckdb-cli/cli.zip "https://github.com/duckdb/duckdb/releases/download/$VERSION/$ASSET"
-  unzip -oq build/duckdb-cli/cli.zip -d build/duckdb-cli
-  rm build/duckdb-cli/cli.zip
+  curl -sSfL -o build/duckdb-cli/cli.tar.gz \
+    "https://github.com/duckdb/duckdb/releases/download/$VERSION/duckdb-cli-$PLATFORM.tar.gz"
+  tar -xzf build/duckdb-cli/cli.tar.gz -C build/duckdb-cli
+  rm build/duckdb-cli/cli.tar.gz
 fi
 echo
 echo "Built build/release/extension/malloy/malloy.duckdb_extension for DuckDB $VERSION. Try:"
