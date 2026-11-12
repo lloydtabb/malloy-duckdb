@@ -8,6 +8,7 @@
 #include "duckdb.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/file_system.hpp"
+#include "duckdb/common/printer.hpp"
 #include "duckdb/common/string_util.hpp"
 #include "duckdb/function/table_function.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -662,6 +663,12 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// user has already chosen a setting.
 	if (Settings::Get<AllowParserOverrideExtensionSetting>(config) == AllowParserOverride::DEFAULT_OVERRIDE) {
 		config.SetOptionByName(AllowParserOverrideExtensionSetting::Name, Value("fallback"));
+	}
+
+	// A pointer to the help, for someone at a terminal. Scripts, pipes and
+	// programs that load the extension get nothing.
+	if (Printer::IsTerminal(OutputStream::STREAM_STDERR)) {
+		Printer::Print(OutputStream::STREAM_STDERR, "Malloy loaded. Run 'malloy' to get help on this extension.");
 	}
 }
 
