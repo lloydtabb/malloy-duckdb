@@ -78,8 +78,6 @@ Compile speed in QuickJS, on 4 cores with the two-file flights model:
 
 Known gaps:
 
-- Timestamp literals and timezones (`@2003-01-15`, `timezone:`) don't
-  compile yet: Malloy uses `luxon`, which needs `Intl`, and QuickJS has none.
 - Every query recompiles the models it uses, rereading their files and
   re-describing their tables; nothing is cached yet.
 - The session model belongs to one connection and ends with it.

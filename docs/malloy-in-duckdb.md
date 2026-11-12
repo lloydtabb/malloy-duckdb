@@ -523,6 +523,5 @@ a shared database as you would any other table.
 
 ## Not yet supported
 
-- Timestamp literals and timezones in Malloy (`@2003-01-15`, `timezone:`).
 - Caching: each query recompiles the models it uses, which takes tens of
   milliseconds, more for large models.
