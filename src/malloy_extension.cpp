@@ -737,7 +737,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	// A pointer to the help, for someone at a terminal. Scripts, pipes and
 	// programs that load the extension get nothing.
 	if (Printer::IsTerminal(OutputStream::STREAM_STDERR)) {
-		Printer::Print(OutputStream::STREAM_STDERR, "Malloy loaded. Run 'malloy' to get help on this extension.");
+		Printer::Print(OutputStream::STREAM_STDERR, "Malloy loaded. Run 'malloy;' to get help on this extension.");
 	}
 }
 
