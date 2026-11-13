@@ -1,0 +1,8 @@
+##! experimental.array_queries
+source: movie_arrays is duckdb.table('movies') extend {
+  measure: movie_count is count()
+  dimension:
+    genre_count is genres -> { aggregate: n is count() }
+    is_scifi is genres -> { aggregate: n is count() { where: each = 'SciFi' } } > 0
+    first_born is directors -> { aggregate: n is born.min() }
+}

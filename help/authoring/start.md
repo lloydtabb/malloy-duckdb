@@ -24,7 +24,8 @@ Use plain SQL. It's faster than guessing:
 
 `SUMMARIZE` finds the keys (a column with as many distinct values as rows)
 and the grain (what one row is). DuckDB reads files as tables too:
-`DESCRIBE 'data/flights.parquet'`.
+`DESCRIBE 'data/flights.parquet'`. Columns of type `X[]` or `STRUCT(...)[]`
+are arrays; `malloy help language/arrays` shows how to model them.
 
 If you don't know what the model should answer, ask the person. They know
 the data and which questions matter.
@@ -127,4 +128,5 @@ every model from where it was installed from.
 Don't guess syntax or field names: `malloy check` and `malloy describe` are
 ground truth, and an error names what's wrong. `malloy help writing-malloy-with-mcp`
 has the common errors, and `malloy help` lists the language reference topics
-(`language/joins`, `language/aggregate-locality-symmetric-aggregates`...).
+(`language/joins`, `language/arrays`,
+`language/aggregate-locality-symmetric-aggregates`...).
