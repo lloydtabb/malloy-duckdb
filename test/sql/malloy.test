@@ -74,6 +74,11 @@ SELECT help FROM malloy_help_topic('authoring/start') LIMIT 1;
 authoring/start
 
 query I
+SELECT count(*) > 0 FROM malloy_help_topic('language/arrays') WHERE help LIKE '%experimental.array_queries%';
+----
+true
+
+query I
 SELECT count(*) > 0 FROM malloy_help_topic('develop/documenting-models') WHERE help LIKE '%malloy describe%';
 ----
 true
@@ -206,6 +211,24 @@ statement error
 SELECT * FROM malloy_compile('SELECT 1');
 ----
 malloy compile takes a run: statement
+
+# Querying an array in place with ->; DuckDB 2.0 needs lambda x: lambdas
+query I
+malloy import 'test/models/movie_arrays.malloy';
+----
+imported 1 source (movie_arrays)
+
+query III
+run: movie_arrays -> { where: is_scifi; group_by: title, genre_count, first_born; order_by: title };
+----
+Alien	2	1937
+Blade Runner	1	1937
+
+query II
+run: movie_arrays -> { where: is_scifi; group_by: genres.each; aggregate: movie_count; order_by: each };
+----
+Horror	1
+SciFi	2
 
 # A run: after malloy sql / malloy compile may hold semicolons in its braces
 statement ok
