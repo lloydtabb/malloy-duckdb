@@ -209,6 +209,7 @@ MALLOY_BIND(MalloyHelpBind) {
 	    {"%{ <query> }%", "A Malloy query inside SQL, anywhere a table can go"},
 	    {"source: ..., query: ...", "Defines a source or named query in this session"},
 	    {"malloy help [<topic>]", "Lists Malloy help topics, or shows one: malloy help language/joins"},
+	    {"malloy help authoring/start", "How to write a Malloy model for this database, start to finish"},
 	    {"malloy sources", "Lists the sources and named queries you can use, with descriptions"},
 	    {"malloy describe <name>", "A source's fields, grouped, with joins and nested data; malloy_describe() has more"},
 	    {"malloy sql <statement>", "Shows a statement with its Malloy compiled to SQL"},

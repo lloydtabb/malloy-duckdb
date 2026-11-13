@@ -28,7 +28,8 @@ malloy install 'models/imdb.malloy';
 ```
 
 The full guide, covering getting started, installing models and testing
-changes, is [docs/malloy-in-duckdb.md](docs/malloy-in-duckdb.md). `malloy`
+changes, is [docs/malloy-in-duckdb.md](docs/malloy-in-duckdb.md). To have an agent write a model, point it at
+`malloy help authoring/start`. `malloy`
 on its own lists the commands. In the DuckDB CLI, end each statement with
 `;`, as for SQL.
 
@@ -147,5 +148,6 @@ scripts/update-bundle.sh /path/to/malloy
 | `js/malloy-embedded.js` | The Malloy compiler bundle (generated; see `js/BUNDLE_SOURCE`) |
 | `cmake/embed_js.cmake` | Compiles the JavaScript into the extension as byte arrays |
 | `test/sql/malloy.test` | SQL tests; models in `test/models/` |
+| `help/` | Help topics written for this extension (`authoring/start`); `scripts/update-help.py` adds malloyyo's |
 | `scripts/run-tests-cli.py` | Runs `test/sql/malloy.test` through the DuckDB CLI, without a full build |
 | `duckdb`, `extension-ci-tools`, `third_party/quickjs` | Submodules |

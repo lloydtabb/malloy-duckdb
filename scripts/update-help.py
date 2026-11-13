@@ -4,19 +4,26 @@
     scripts/update-help.py /path/to/malloyyo
 
 Copies only the topics about Malloy itself (the language reference, pick,
-query examples), not the ones about malloyyo (dashboards, publishing, repos,
-sites). Topic names match malloyyo's yo_help, so `malloy help language/joins`
+query examples, documenting models, writing Malloy against a compiler), not
+the ones about malloyyo (dashboards, publishing, repos, sites), and adds the
+topics written for this extension in help/ (authoring/start). Topic names match malloyyo's yo_help, so `malloy help language/joins`
 and `yo_help("language/joins")` are the same topic. References to
 malloyyo's tools are changed to the extension's commands.
 """
-import json, os, subprocess, sys
+import json, os, re, subprocess, sys
 
 TOPICS = [
     'language/malloy-language-reference.md',  # split on its ## headings
     'language/pick.md',
     'explore/query-examples.md',
+    'develop/documenting-models.md',
+    'writing-malloy-with-mcp.md',
 ]
 RENAMES = [
+    # malloyyo's lint checks descriptions; the extension has no equivalent.
+    ('`malloyyo lint` warns when the model has no `##\"`, when an exported source has\nno `#\"`, and when either runs past the sizes above. These are warnings, so\nthey never block a publish.', '`malloy check` compiles the model; `malloy sources` and `malloy describe`\nshow the descriptions as a reader sees them.'),
+    (' (lint warns past 500 characters)', ''),
+    (' (lint warns past 300)', ''),
     ('`describe_source`', '`malloy describe`'),
     ('describe_source', 'malloy describe'),
     ('`list_sources`', '`malloy sources`'),
@@ -31,7 +38,15 @@ for topic in TOPICS:
     text = open(os.path.join(content, topic)).read()
     for old, new in RENAMES:
         text = text.replace(old, new)
+    text = re.sub(r'yo_help\("([^"]+)"\)', r'`malloy help \1`', text)
     files[topic] = text
+# Topics written for this extension, in help/ (e.g. authoring/start).
+local = os.path.join(root, 'help')
+for dirpath, _, names in os.walk(local):
+    for name in sorted(names):
+        if name.endswith('.md'):
+            path = os.path.join(dirpath, name)
+            files[os.path.relpath(path, local)] = open(path).read()
 commit = subprocess.run(['git', '-C', malloyyo, 'rev-parse', '--short', 'HEAD'],
                         capture_output=True, text=True).stdout.strip()
 out = os.path.join(root, 'js/help-content.js')
