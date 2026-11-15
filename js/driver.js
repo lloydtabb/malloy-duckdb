@@ -108,7 +108,7 @@
   function invalidationKey(url, contents) {
     let base;
     if (inMemory.has(url)) base = hash(inMemory.get(url));
-    else if (url.startsWith(STORE_SCHEME) && installedKeys(url).files[url]) base = installedKeys(url).files[url];
+    else if (url.startsWith(STORE_SCHEME)) base = installedKeys(url).files[url];
     else base = hash(contents ?? host.readURL(url));
     return `${base} ${hash(tablesFor(url).map(schemaOf).join('\n'))}`;
   }

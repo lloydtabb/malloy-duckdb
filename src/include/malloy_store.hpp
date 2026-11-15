@@ -85,8 +85,7 @@ public:
 	static void UninstallSource(ClientContext &context, const string &catalog, const string &name);
 
 	//! The cache keys install wrote for the model that `url` (a FileURL)
-	//! belongs to, read in one connection. A file installed before digests
-	//! were written has an empty digest.
+	//! belongs to.
 	static InstalledKeys Keys(ClientContext &context, const string &url);
 
 	//! Every installed file in `catalog`: (model, path, contents).
