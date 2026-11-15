@@ -1,6 +1,6 @@
-// Runs inside QuickJS, after malloy-embedded.js. It drives the Malloy
-// compiler's needs loop, asking the C++ side (globalThis.__malloyHost) for
-// whatever the compiler needs:
+// Runs inside QuickJS, after malloy-embedded.js and catalog.js. It is a
+// Malloy host: one long-lived Runtime, asking the C++ side
+// (globalThis.__malloyHost) for files and table schemas:
 //
 //   __malloyHost.readURL(url)      -> the file's text
 //   __malloyHost.describe(sqlFrom) -> JSON: [[column_name, duckdb_type], ...]
@@ -20,94 +20,168 @@
 (function () {
   'use strict';
   const host = globalThis.__malloyHost;
-  const malloy = globalThis.malloyEmbedded;
+  const {malloy, duckdb} = globalThis.malloyEmbedded;
   const CONNECTION = 'duckdb';
 
-  // DuckDB column types become Malloy types exactly as Malloy's own DuckDB
-  // connection converts them, nested STRUCT and LIST types included.
-  function schemaFor(sqlFrom) {
-    return JSON.parse(malloy.duckdbSchema(host.describe(sqlFrom)));
+  // A small, fast string hash: invalidation keys for model text.
+  function hash(text) {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < text.length; i++) {
+      h ^= text.charCodeAt(i);
+      h = Math.imul(h, 0x01000193);
+    }
+    return `${text.length}:${(h >>> 0).toString(16)}`;
+  }
+
+  // What one compile touched, for the model cache and for `collect`.
+  let recording = null; // {files: Map<url, contents>, tables: Map<from, describeJSON>}
+  let inMemory = new Map(); // url -> model text the C++ side holds in memory
+
+  // The connection: everything Malloy does with DuckDB (DESCRIBE, the type
+  // mapping) is DuckDBCommon's. The only SQL Malloy sends while compiling is
+  // `DESCRIBE SELECT * FROM <x>`, which the host answers by binding <x> in
+  // the caller's own connection and transaction.
+  const DESCRIBE = /^DESCRIBE SELECT \* FROM ([\s\S]*)$/;
+  const connection = new duckdb.HostDuckDBConnection(CONNECTION, {
+    query(sql) {
+      const m = DESCRIBE.exec(sql.trim());
+      if (!m) throw new Error(`malloy-duckdb runs no SQL while compiling: ${sql}`);
+      const json = host.describe(m[1]);
+      if (recording) recording.tables.set(m[1], json);
+      return JSON.parse(json).map(([column_name, column_type]) => ({column_name, column_type}));
+    },
+  });
+
+  const runtime = new malloy.Runtime({
+    connection,
+    urlReader: {
+      async readURL(url) {
+        const u = url.toString();
+        const contents = inMemory.has(u) ? inMemory.get(u) : host.readURL(u);
+        if (recording && !inMemory.has(u)) recording.files.set(u, contents);
+        return {contents, invalidationKey: hash(contents)};
+      },
+    },
+  });
+
+  // Compiled models, kept across calls. A model depends on the files it
+  // read and on the schemas of the tables and SQL sources it described;
+  // both can change between statements (CREATE OR REPLACE, ATTACH, another
+  // connection's temporary table), so a hit re-reads and re-describes them,
+  // which is cheap next to compiling, and recompiles if anything differs.
+  const models = new Map(); // key -> {materializer, files, tables}
+  const MAX_MODELS = 32;
+
+  function stillValid(entry) {
+    for (const [url, contents] of entry.files) {
+      let now;
+      try {
+        now = host.readURL(url);
+      } catch (e) {
+        return false;
+      }
+      if (now !== contents) return false;
+    }
+    for (const [from, json] of entry.tables) {
+      let now;
+      try {
+        now = host.describe(from);
+      } catch (e) {
+        return false;
+      }
+      if (now !== json) return false;
+    }
+    return true;
+  }
+
+  // Every compile describes its tables again, in the caller's context, so
+  // that what it records is current. `refreshSchemaCache` takes a time; an
+  // increasing one refreshes even two compiles in the same millisecond.
+  let lastRefresh = 0;
+  function refresh() {
+    lastRefresh = Math.max(lastRefresh + 1, Date.now());
+    return {refreshSchemaCache: lastRefresh};
+  }
+
+  // Runs `fn` with `modelText` (if any) serving `modelURL`.
+  async function withModel(modelURL, modelText, fn) {
+    const saved = inMemory;
+    inMemory = new Map(saved);
+    if (typeof modelText === 'string') inMemory.set(modelURL, modelText);
+    try {
+      return await fn();
+    } finally {
+      inMemory = saved;
+    }
+  }
+
+  // The compiled model at `modelURL`, from the cache when nothing it
+  // depends on has changed.
+  async function loadModel(modelURL, modelText) {
+    const key = `${modelURL}\u0000${typeof modelText === 'string' ? hash(modelText) : ''}`;
+    const hit = models.get(key);
+    if (hit && stillValid(hit)) {
+      models.delete(key);
+      models.set(key, hit); // most recently used last
+      return hit.materializer;
+    }
+    models.delete(key);
+    const materializer = runtime.loadModel(new URL(modelURL), refresh());
+    const seen = (recording = {files: new Map(), tables: new Map()});
+    try {
+      await withModel(modelURL, modelText, () => materializer.getModel());
+    } catch (e) {
+      fail(e); // not cached: the next call compiles again
+    } finally {
+      recording = null;
+    }
+    models.set(key, {materializer, files: seen.files, tables: seen.tables});
+    while (models.size > MAX_MODELS) models.delete(models.keys().next().value);
+    return materializer;
   }
 
   // How a compile error says where it is. `session` describes the session
   // model, so errors in it can point at the statement being added.
-  function where(log, session) {
-    const url = log.url || '';
-    const line = log.range ? log.range.start.line + 1 : 0;
-    const col = log.range ? log.range.start.character + 1 : 0;
-    if (url.startsWith('internal://query/')) {
-      return line ? `query line ${line}, column ${col}` : 'query';
-    }
-    if (session && url === session.url) {
-      if (line > session.newFromLine) {
-        return `line ${line - session.newFromLine}, column ${col}`;
-      }
-      return line ? `session model line ${line}` : 'session model';
+  function where(problem) {
+    const url = (problem.at && problem.at.url) || '';
+    const start = problem.at && problem.at.range ? problem.at.range.start : undefined;
+    const line = start ? start.line + 1 : 0;
+    const col = start ? start.character + 1 : 0;
+    if (url.startsWith('internal://')) {
+      // A query, or a statement being added to the session (extendModel).
+      return line ? `line ${line}, column ${col}` : 'query';
     }
     return line ? `${url}:${line}:${col}` : url;
   }
 
-  function fail(logs, session) {
-    const errors = logs.filter(l => l.severity === 'error');
-    throw new Error(errors.map(e => `${e.message} (${where(e, session)})`).join('\n'));
+  function fail(e) {
+    const problems = e && Array.isArray(e.problems) ? e.problems.filter(p => p.severity === 'error') : [];
+    if (!problems.length) throw e instanceof Error ? e : new Error(String(e));
+    throw new Error(problems.map(p => `${p.message} (${where(p)})`).join('\n'));
   }
 
-  // Runs one compile to completion. `compile` is a malloyEmbedded function.
-  // `observe`, if given, is told of every file read ({url, contents}) and
-  // every table described ({table}).
-  function drive(compile, request, modelText, session, observe) {
-    const needs = {
-      connections: [{name: CONNECTION, dialect: 'duckdb'}],
-      files: [],
-      table_schemas: [],
-      sql_schemas: [],
-    };
-    for (let round = 0; round < 100; round++) {
-      const response = JSON.parse(compile(JSON.stringify({...request, compiler_needs: needs})));
-      const logs = response.logs || [];
-      if (logs.some(l => l.severity === 'error')) fail(logs, session);
-      const asked = response.compiler_needs;
-      if (!asked) return response;
-      let progress = false;
-      for (const file of asked.files || []) {
-        const inMemory = typeof modelText === 'string' && file.url === request.model_url;
-        const text = inMemory ? modelText : host.readURL(file.url);
-        if (observe && !inMemory) observe({url: file.url, contents: text});
-        needs.files.push({url: file.url, contents: text});
-        progress = true;
-      }
-      for (const table of asked.table_schemas || []) {
-        if (observe) observe({table: table.name});
-        needs.table_schemas.push({...table, schema: schemaFor(table.name)});
-        progress = true;
-      }
-      for (const sql of asked.sql_schemas || []) {
-        needs.sql_schemas.push({...sql, schema: schemaFor(`(${sql.sql})`)});
-        progress = true;
-      }
-      for (const c of asked.connections || []) {
-        if (!needs.connections.some(k => k.name === c.name)) {
-          throw new Error(`Unknown connection '${c.name}'; inside DuckDB the only connection is '${CONNECTION}'`);
-        }
-      }
-      if (!progress) {
-        throw new Error('Malloy compiler asked for something malloy-duckdb cannot supply: ' + JSON.stringify(asked));
-      }
+  async function prepared(modelURL, queryText, modelText) {
+    const model = await loadModel(modelURL, modelText);
+    try {
+      return await withModel(modelURL, modelText, () => model.loadQuery(queryText, refresh()).getPreparedResult());
+    } catch (e) {
+      fail(e);
     }
-    throw new Error('Malloy compile did not finish');
   }
 
   // Every source and named query the model can see, described: see
-  // compileModelCatalog in malloy-embedded's catalog.ts.
-  function catalog(modelURL, modelText) {
-    const response = drive(malloy.compileModelCatalog, {model_url: modelURL}, modelText);
-    return (response.catalog && response.catalog.entries) || [];
+  // js/catalog.js.
+  async function catalog(modelURL, modelText) {
+    const model = await (await loadModel(modelURL, modelText)).getModel();
+    return globalThis.malloyCatalog.catalogOf(model._modelDef).entries;
   }
 
-  // Everything the model can see: sources and named queries, imports included.
-  function contents(modelURL, modelText, session) {
-    const response = drive(malloy.compileModelContents, {model_url: modelURL}, modelText, session);
-    return (response.model && response.model.entries) || [];
+  // Everything a model can see: sources and named queries, imports included.
+  function contentsOf(model) {
+    return [
+      ...model.explores.map(e => ({kind: 'source', name: e.name})),
+      ...model.queries().named.map(name => ({kind: 'query', name})),
+    ];
   }
 
   // A table path naming a file relative to the working directory, such as
@@ -214,19 +288,15 @@
     },
 
     // Malloy query text -> DuckDB SQL.
-    toSQL(modelURL, queryText, modelText) {
-      const response = drive(malloy.compileQuery, {model_url: modelURL, query_malloy: queryText}, modelText);
-      if (!response.result || typeof response.result.sql !== 'string') {
-        throw new Error('Malloy produced no SQL for this query');
-      }
-      return response.result.sql;
+    async toSQL(modelURL, queryText, modelText) {
+      return (await prepared(modelURL, queryText, modelText)).sql;
     },
 
     // Rows of kind, name, description, primary_key, filters, joins, fields:
     // every source and named query the model can see.
-    listSources(modelURL, modelText) {
+    async listSources(modelURL, modelText) {
       return listing(
-        catalog(modelURL, modelText).map(e => {
+        (await catalog(modelURL, modelText)).map(e => {
           const joins = e.fields
             .filter(f => f.kind === 'join' && !f.path.includes('.'))
             .map(f => `${f.path} (${f.type.replace(/^join_/, '')})`);
@@ -256,8 +326,8 @@
     // Rows of path, kind, type, grain, description, definition, usage,
     // example: every field of one source or named query, through its joins
     // and nested data.
-    describe(modelURL, name, modelText) {
-      const entries = catalog(modelURL, modelText);
+    async describe(modelURL, name, modelText) {
+      const entries = await catalog(modelURL, modelText);
       const entry = entries.find(e => e.name === name);
       if (!entry) {
         const known = entries.map(e => e.name).sort().join(', ');
@@ -280,8 +350,8 @@
 
     // One row per line: a source or named query, compactly. Its own fields
     // grouped by kind, then each join and nested array with its fields.
-    describeText(modelURL, name, modelText) {
-      const entries = catalog(modelURL, modelText);
+    async describeText(modelURL, name, modelText) {
+      const entries = await catalog(modelURL, modelText);
       const entry = entries.find(e => e.name === name);
       if (!entry) {
         const known = entries.map(e => e.name).sort().join(', ');
@@ -360,12 +430,8 @@
     // output schema (nested fields included, each with its annotations), and
     // the query's, source's and model's annotations. Malloy's own Result
     // shape, without the data.
-    compile(modelURL, queryText, modelText) {
-      const response = drive(malloy.compileQuery, {model_url: modelURL, query_malloy: queryText}, modelText);
-      if (!response.result) {
-        throw new Error('Malloy produced no result for this query');
-      }
-      const {data, ...result} = response.result;
+    async compile(modelURL, queryText, modelText) {
+      const {data, ...result} = (await prepared(modelURL, queryText, modelText)).toStableResult();
       return JSON.stringify(result);
     },
 
@@ -374,13 +440,20 @@
     // what it makes newly visible. The session model is `prefix` (imports of
     // installed sources it needs) followed by `sessionText`. Changes nothing:
     // the caller appends `newText` to its session model.
-    define(modelURL, prefix, sessionText, newText) {
-      const join = parts => parts.filter(p => p).join('\n');
-      const before = new Set(contents(modelURL, join([prefix, sessionText])).map(e => `${e.kind}\t${e.name}`));
-      const lines = text => (text ? text.split('\n').length : 0);
-      const session = {url: modelURL, newFromLine: lines(prefix) + lines(sessionText)};
-      const after = contents(modelURL, join([prefix, sessionText, newText]), session);
-      return listing(after.filter(e => !before.has(`${e.kind}\t${e.name}`)).map(e => [e.kind, e.name]));
+    async define(modelURL, prefix, sessionText, newText) {
+      const text = [prefix, sessionText].filter(p => p).join('\n');
+      const before = await loadModel(modelURL, text);
+      const known = new Set(contentsOf(await before.getModel()).map(e => `${e.kind}\t${e.name}`));
+      // The new statements compile against the session model as it is; error
+      // positions are relative to `newText` itself.
+      const after = before.extendModel(newText, {importBaseURL: new URL(modelURL), ...refresh()});
+      let afterModel;
+      try {
+        afterModel = await withModel(modelURL, text, () => after.getModel());
+      } catch (e) {
+        fail(e);
+      }
+      return listing(contentsOf(afterModel).filter(e => !known.has(`${e.kind}\t${e.name}`)).map(e => [e.kind, e.name]));
     },
 
     // Compiles the model file at `modelURL` and lists, one row each:
@@ -388,21 +461,25 @@
     //   entry   <kind> <name>      every source and named query it exports
     //   warning <message>          a source reading a file by a relative path
     // For `malloy install` and `malloy check`.
-    collect(modelURL) {
-      const files = [];
-      const warnings = [];
-      const response = drive(malloy.compileModel, {model_url: modelURL}, undefined, undefined, seen => {
-        if (seen.url !== undefined) {
-          files.push(['file', seen.url, seen.contents]);
-        } else if (looksLikeRelativeFile(seen.table)) {
-          warnings.push(['warning', `reads the file ${seen.table} by a relative path, which only works where DuckDB runs in the same directory; for a shared database, load it into a table or use an absolute, s3:// or https:// location`]);
-        }
-      });
-      const translation = (response.translations || []).find(t => t.url === modelURL);
-      const modelDef = translation ? JSON.parse(translation.compiled_model_json) : {contents: {}};
-      const entries = ((response.model && response.model.entries) || []).map(e => {
-        const def = modelDef.contents[e.name];
-        return ['entry', def && def.type === 'query' ? 'query' : e.kind, e.name];
+    async collect(modelURL) {
+      // Always a fresh compile: what matters is every file and table it reads.
+      recording = {files: new Map(), tables: new Map()};
+      let modelDef;
+      try {
+        modelDef = (await runtime.loadModel(new URL(modelURL), refresh()).getModel())._modelDef;
+      } catch (e) {
+        fail(e);
+      } finally {
+        var seen = recording;
+        recording = null;
+      }
+      const files = [...seen.files].map(([url, contents]) => ['file', url, contents]);
+      const warnings = [...seen.tables.keys()]
+        .filter(looksLikeRelativeFile)
+        .map(table => ['warning', `reads the file ${table} by a relative path, which only works where DuckDB runs in the same directory; for a shared database, load it into a table or use an absolute, s3:// or https:// location`]);
+      const entries = (modelDef.exports || []).map(name => {
+        const def = modelDef.contents[name];
+        return ['entry', def && def.type === 'query' ? 'query' : 'source', name];
       });
       return listing([...files, ...entries, ...warnings]);
     },

@@ -37,8 +37,10 @@ on its own lists the commands. In the DuckDB CLI, end each statement with
 
 The Malloy compiler is TypeScript. This extension embeds
 [QuickJS-ng](https://github.com/quickjs-ng/quickjs), a small JavaScript
-engine written in C, and runs the compiler in it as one bundled script
-(`js/malloy-embedded.js`, built by Malloy's `packages/malloy-embedded`).
+engine written in C, and runs Malloy in it as one bundled script
+(`js/malloy-embedded.js`, built by Malloy's `packages/malloy-embedded`). The
+bundle is Malloy's own npm packages, so the extension is an ordinary Malloy
+host: a `Runtime` with a URL reader and a DuckDB connection.
 
 - **Recognizing Malloy.** DuckDB's parser override hook offers the
   extension every script before DuckDB parses it. `src/malloy_statements.cpp`
@@ -46,13 +48,19 @@ engine written in C, and runs the compiler in it as one bundled script
   `source:`, `query:`, `malloy` commands, and `%{ }%` inside SQL, following
   MalloySQL's syntax) into SQL calling the extension's table functions.
   Scripts with no Malloy are left for DuckDB to parse as usual.
-- **Compiling.** The compiler does no IO itself; it asks for what it needs.
-  `js/driver.js` runs that loop and calls back into C++
-  (`src/malloy_engine.cpp`) for files, read through DuckDB's file system or,
-  for installed models, from the database, and for the schemas of
-  `duckdb.table(...)` and `duckdb.sql(...)` sources, found by binding
-  `SELECT * FROM <source>` in the calling connection. Column types become
-  Malloy types through Malloy's own DuckDB type parser.
+- **Compiling.** `js/driver.js` keeps one Malloy `Runtime` for the
+  process. It calls back into C++ (`src/malloy_engine.cpp`) for files, read
+  through DuckDB's file system or, for installed models, from the database,
+  and for the schemas of `duckdb.table(...)` and `duckdb.sql(...)` sources,
+  found by binding `SELECT * FROM <source>` in the calling connection.
+  Malloy's DuckDB connection code turns those into Malloy types. The Runtime
+  API returns promises; the C++ side runs QuickJS's job queue until each
+  one settles.
+- **Caching.** Compiled models are kept between statements. A cached model
+  remembers the files it read and the schema of every table and SQL source
+  it used; before it is reused, the files are read and the schemas bound
+  again, and any difference means a recompile. So `CREATE OR REPLACE TABLE`,
+  a reinstalled model, or another connection's temporary table are seen.
 - **Running.** `malloy()` hands DuckDB the generated SQL as a subquery (the
   same mechanism as DuckDB's `query()` function), and DuckDB plans and runs
   it.
@@ -73,15 +81,14 @@ Compile speed in QuickJS, on 4 cores with the two-file flights model:
 
 | | Time |
 |---|---|
-| First compile in a process (creates the JS runtime, loads the 2.2 MB bundle) | ~2.2 s |
-| Each compile after that | 50–75 ms |
+| First compile in a process (creates the JS runtime, loads the 2.3 MB bundle) | ~3 s |
+| A query against a model already compiled | ~30 ms |
 
 Known gaps:
 
-- Timestamp literals and timezones (`@2003-01-15`, `timezone:`) don't
-  compile yet: Malloy uses `luxon`, which needs `Intl`, and QuickJS has none.
-- Every query recompiles the models it uses, rereading their files and
-  re-describing their tables; nothing is cached yet.
+- Checking a cached model reads each of its installed files with a query
+  of its own, about 4–5 ms each; one query for all of a model's files would
+  be faster.
 - The session model belongs to one connection and ends with it.
 - Not yet tried with MotherDuck beyond a simple query.
 - An error in a Malloy statement is reported with the SQL it was rewritten
@@ -145,8 +152,9 @@ scripts/update-bundle.sh /path/to/malloy
 | `src/malloy_extension.cpp` | Table functions, the session model, registration |
 | `src/malloy_statements.cpp` | Recognizing and rewriting Malloy statements and `%{ }%` |
 | `src/malloy_store.cpp` | Installed models: the `malloy.files` and `malloy.sources` tables |
-| `src/malloy_engine.cpp` | QuickJS runtime and the C++ side of the compile loop |
-| `js/driver.js` | The JavaScript side of the compile loop |
+| `src/malloy_engine.cpp` | QuickJS runtime, and the files and schemas the driver asks for |
+| `js/driver.js` | The Malloy host: Runtime, model cache, and the extension's commands |
+| `js/catalog.js` | What `malloy sources` and `malloy describe` show about a model |
 | `js/malloy-embedded.js` | The Malloy compiler bundle (generated; see `js/BUNDLE_SOURCE`) |
 | `cmake/embed_js.cmake` | Compiles the JavaScript into the extension as byte arrays |
 | `test/sql/malloy.test` | SQL tests; models in `test/models/` |

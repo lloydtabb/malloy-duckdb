@@ -18,6 +18,8 @@ extern "C" {
 // NUL-terminated; the length excludes the NUL, as JS_Eval wants.
 extern const unsigned char MALLOY_EMBEDDED_JS[];
 extern const size_t MALLOY_EMBEDDED_JS_LEN;
+extern const unsigned char MALLOY_CATALOG_JS[];
+extern const size_t MALLOY_CATALOG_JS_LEN;
 extern const unsigned char MALLOY_DRIVER_JS[];
 extern const size_t MALLOY_DRIVER_JS_LEN;
 extern const unsigned char MALLOY_HELP_JS[];
@@ -211,6 +213,7 @@ public:
 		JS_FreeValue(ctx, global);
 
 		Eval(reinterpret_cast<const char *>(MALLOY_EMBEDDED_JS), MALLOY_EMBEDDED_JS_LEN, "malloy-embedded.js");
+		Eval(reinterpret_cast<const char *>(MALLOY_CATALOG_JS), MALLOY_CATALOG_JS_LEN, "catalog.js");
 		Eval(reinterpret_cast<const char *>(MALLOY_HELP_JS), MALLOY_HELP_JS_LEN, "help-content.js");
 		Eval(reinterpret_cast<const char *>(MALLOY_DRIVER_JS), MALLOY_DRIVER_JS_LEN, "driver.js");
 	}
@@ -240,6 +243,13 @@ public:
 		JS_FreeValue(ctx, fn);
 		JS_FreeValue(ctx, api);
 		JS_FreeValue(ctx, global);
+
+		// Malloy's Runtime API is asynchronous, but the host callbacks are
+		// synchronous, so the promise settles once the job queue is drained.
+		// The host callbacks still need the context while jobs run.
+		if (!JS_IsException(result) && JS_IsPromise(result)) {
+			result = Settle(result);
+		}
 		JS_SetContextOpaque(ctx, previous);
 
 		if (JS_IsException(result)) {
@@ -259,6 +269,30 @@ public:
 	std::recursive_mutex lock;
 
 private:
+	//! Runs pending jobs until `promise` settles; returns its value, or
+	//! JS_EXCEPTION with the rejection pending. Takes ownership of `promise`.
+	JSValue Settle(JSValue promise) {
+		while (JS_PromiseState(ctx, promise) == JS_PROMISE_PENDING) {
+			JSContext *job_ctx;
+			int ran = JS_ExecutePendingJob(rt, &job_ctx);
+			if (ran < 0) {
+				JS_FreeValue(ctx, promise);
+				return JS_EXCEPTION;
+			}
+			if (ran == 0 && JS_PromiseState(ctx, promise) == JS_PROMISE_PENDING) {
+				JS_FreeValue(ctx, promise);
+				return JS_ThrowInternalError(ctx, "the Malloy call did not finish: it is waiting on asynchronous work the host never runs (a timer or real IO)");
+			}
+		}
+		JSValue value = JS_PromiseResult(ctx, promise);
+		bool rejected = JS_PromiseState(ctx, promise) == JS_PROMISE_REJECTED;
+		JS_FreeValue(ctx, promise);
+		if (rejected) {
+			return JS_Throw(ctx, value);
+		}
+		return value;
+	}
+
 	void Eval(const char *source, size_t len, const char *filename) {
 		JSValue result = JS_Eval(ctx, source, len, filename, JS_EVAL_TYPE_GLOBAL);
 		if (JS_IsException(result)) {
