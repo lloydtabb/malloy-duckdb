@@ -1,4 +1,4 @@
-// Runs inside QuickJS, after malloy-embedded.js and catalog.js. It is a
+// Runs inside QuickJS, after malloy-embedded.js and help-content.js. It is a
 // Malloy host: one long-lived Runtime, asking the C++ side
 // (globalThis.__malloyHost) for files and table schemas:
 //
@@ -8,7 +8,7 @@
 //   __malloyHost.modelKeys(url)    -> JSON: the cache keys install wrote for
 //                                     the installed model `url` belongs to
 //
-// Both throw on failure.
+// Each throws on failure.
 //
 // Every entry point on globalThis.malloyDuckDB compiles against a model,
 // named by `modelURL`. If `modelText` is a string, it is that model's source
@@ -24,16 +24,6 @@
   const host = globalThis.__malloyHost;
   const {malloy, duckdb, engine} = globalThis.malloyEmbedded;
   const CONNECTION = 'duckdb';
-
-  // A small, fast string hash: invalidation keys for model text.
-  function hash(text) {
-    let h = 0x811c9dc5;
-    for (let i = 0; i < text.length; i++) {
-      h ^= text.charCodeAt(i);
-      h = Math.imul(h, 0x01000193);
-    }
-    return `${text.length}:${(h >>> 0).toString(16)}`;
-  }
 
   // What one compile touched, for the model cache and for `collect`.
   let recording = null; // {files: Map<url, contents>, tables: Map<from, describeJSON>}
@@ -92,25 +82,28 @@
     return schemas.get(from);
   }
 
-  // The tables and SQL sources a model's compile described, by model URL,
-  // for models that were not installed (the session model, a file on disk).
+  // The tables and SQL sources a compile described, by the URL of every file
+  // it read, for models that were not installed (the session model, files on
+  // disk): an imported file's key must change with the tables its sources
+  // read, or Malloy serves the import from its cache with the old schema.
   const modelTables = new Map();
   function tablesFor(url) {
     return url.startsWith(STORE_SCHEME) ? installedKeys(url).tables : modelTables.get(url) || [];
   }
 
   // A file's invalidation key for Malloy's CacheManager: what the file says
-  // (install's digest, else a hash of its text), then what the tables of
-  // the model at that URL look like now, bound in the caller's connection.
-  // A cached model is reused only while every file's key is unchanged, so a
-  // reinstalled model, CREATE OR REPLACE TABLE, or another connection's
-  // temporary table by the same name all mean a recompile.
+  // (install's digest, else its text), then what the tables of the model at
+  // that URL look like now, bound in the caller's connection. A cached model
+  // is reused only while every file's key is unchanged, so a reinstalled
+  // model, CREATE OR REPLACE TABLE, or another connection's temporary table
+  // by the same name all mean a recompile. The key holds the strings
+  // themselves: CacheManager only compares them.
   function invalidationKey(url, contents) {
-    let base;
-    if (inMemory.has(url)) base = hash(inMemory.get(url));
-    else if (url.startsWith(STORE_SCHEME)) base = installedKeys(url).files[url];
-    else base = hash(contents ?? host.readURL(url));
-    return `${base} ${hash(tablesFor(url).map(schemaOf).join('\n'))}`;
+    let what;
+    if (inMemory.has(url)) what = inMemory.get(url);
+    else if (url.startsWith(STORE_SCHEME)) what = installedKeys(url).files[url];
+    else what = contents ?? host.readURL(url);
+    return JSON.stringify([what, tablesFor(url).map(schemaOf)]);
   }
 
   const urlReader = {
@@ -169,7 +162,10 @@
     } finally {
       recording = null;
     }
-    if (seen.read) modelTables.set(modelURL, [...seen.tables.keys()]);
+    if (seen.read) {
+      const tables = [...seen.tables.keys()];
+      for (const url of [modelURL, ...seen.files.keys()]) modelTables.set(url, tables);
+    }
     return materializer;
   }
 
@@ -362,7 +358,7 @@
 
 
     getVersion() {
-      return malloy.version;
+      return globalThis.malloyEmbedded.version;
     },
 
     // Malloy query text -> DuckDB SQL.
@@ -501,11 +497,22 @@
   };
 
   // Each call sees the database as it is: install's keys and table schemas
-  // are fetched afresh for it.
+  // are fetched afresh for it. A call can start inside another: describing a
+  // view defined with malloy() runs Malloy again. So each call keeps its own
+  // state, and gives the caller's back when it ends.
   for (const [name, fn] of Object.entries(globalThis.malloyDuckDB)) {
     globalThis.malloyDuckDB[name] = (...args) => {
+      const caller = {recording, inMemory, storeKeys, schemas};
+      const restore = () => ({recording, inMemory, storeKeys, schemas} = caller);
       forgetCallState();
-      return fn(...args);
+      recording = null;
+      inMemory = new Map();
+      try {
+        return Promise.resolve(fn(...args)).finally(restore);
+      } catch (e) {
+        restore();
+        throw e;
+      }
     };
   }
 })();

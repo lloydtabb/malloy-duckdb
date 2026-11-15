@@ -40,7 +40,7 @@ AA	2
 UA	1
 
 query I
-SELECT malloy_version IS NOT NULL FROM malloy_version();
+SELECT regexp_matches(malloy_version, '^[0-9]+\.[0-9]+\.[0-9]+') FROM malloy_version();
 ----
 true
 
@@ -213,6 +213,49 @@ statement error
 malloy describe nope;
 ----
 named 'nope'
+
+# A cached model is reused only while the tables of every file it read are
+# unchanged, imported files included
+statement ok
+CREATE TABLE imported_t AS SELECT 1 AS x;
+
+query I
+malloy import 'test/models/imports/outer.malloy';
+----
+imported 1 source (outer_src)
+
+query I
+run: outer_src -> { select: * };
+----
+1
+
+statement ok
+CREATE OR REPLACE TABLE imported_t AS SELECT 1 AS x, 2 AS y;
+
+query II
+run: outer_src -> { select: * };
+----
+1	2
+
+# A model can read a view defined with malloy()
+statement ok
+CREATE VIEW malloy_view AS SELECT * FROM %{ duckdb.table('flights') -> { select: carrier } }%;
+
+query II
+malloy check 'test/models/views/over_view.malloy';
+----
+over_view	source
+
+# ... but a view whose Malloy compiles a session that reads the view is an error, not a crash
+query I
+source: loops is duckdb.table('malloy_view');
+----
+defined 1 source (loops)
+
+statement error
+run: loops -> { select: * };
+----
+nest more than
 
 statement ok
 malloy reset;

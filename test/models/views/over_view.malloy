@@ -1,0 +1,3 @@
+source: over_view is duckdb.table('malloy_view') extend {
+  measure: carrier_count is count()
+}

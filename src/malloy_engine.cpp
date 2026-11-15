@@ -32,6 +32,10 @@ namespace {
 // because DuckDB may bind on any thread.
 constexpr size_t MALLOY_JS_STACK_SIZE = 4 * 1024 * 1024;
 
+// How deep Malloy calls may nest: describing a view defined with malloy()
+// starts a call inside another.
+constexpr int MAX_DEPTH = 8;
+
 const char *PRELUDE_JS = "globalThis.console = {log() {}, info() {}, warn() {}, error() {}, debug() {}};";
 
 //! Per-call context handed to the host callbacks through the JSContext opaque.
@@ -246,6 +250,21 @@ public:
 	//! Calls malloyDuckDB[method](args...) and returns its string result.
 	//! `context` is what the host callbacks act on; null for calls that need none.
 	string Call(optional_ptr<ClientContext> context, const char *method, const vector<string> &args) {
+		// A call can start inside another: describing a view defined with
+		// malloy() runs Malloy again. A view whose Malloy reads itself would
+		// recurse until the stack overflowed.
+		if (depth >= idx_t(MAX_DEPTH)) {
+			throw BinderException("Malloy: statements nest more than %d deep; is a view defined with malloy() "
+			                      "reading itself through the session model?",
+			                      MAX_DEPTH);
+		}
+		depth++;
+		struct Leave {
+			idx_t &depth;
+			~Leave() {
+				depth--;
+			}
+		} leave {depth};
 		JS_UpdateStackTop(rt);
 		HostCall call {context};
 		auto previous = JS_GetContextOpaque(ctx);
@@ -291,6 +310,8 @@ public:
 	std::recursive_mutex lock;
 
 private:
+	idx_t depth = 0;
+
 	//! Runs pending jobs until `promise` settles; returns its value, or
 	//! JS_EXCEPTION with the rejection pending. Takes ownership of `promise`.
 	JSValue Settle(JSValue promise) {
@@ -298,8 +319,10 @@ private:
 			JSContext *job_ctx;
 			int ran = JS_ExecutePendingJob(rt, &job_ctx);
 			if (ran < 0) {
-				JS_FreeValue(ctx, promise);
-				return JS_EXCEPTION;
+				// A job threw outside any promise; it may not be this call's.
+				// Drop it and go on: this call's own failure rejects its promise.
+				JS_FreeValue(job_ctx, JS_GetException(job_ctx));
+				continue;
 			}
 			if (ran == 0 && JS_PromiseState(ctx, promise) == JS_PROMISE_PENDING) {
 				JS_FreeValue(ctx, promise);

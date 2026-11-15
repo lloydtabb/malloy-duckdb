@@ -58,12 +58,15 @@ malloyyo's `list_sources` and `describe_source` do.
   Malloy's DuckDB connection code turns those into Malloy types. The Runtime
   API returns promises; the C++ side runs QuickJS's job queue until each
   one settles.
-- **Caching.** Compiled models are kept between statements by Malloy's
-  `CacheManager`. A file's cache key is what it says (for an installed
-  model, the digest `malloy install` wrote; otherwise a hash of its text)
-  plus the schemas of the tables its model reads, bound again in the
-  calling connection. So a reinstalled model, `CREATE OR REPLACE TABLE`,
-  or another connection's temporary table means a recompile.
+- **Caching.** Models compiled for queries and for adding to the session
+  are kept between statements by Malloy's `CacheManager`. A file's cache
+  key is what it says (for an installed model, the digest `malloy install`
+  wrote; otherwise its text) plus the schemas of the tables its model
+  reads, bound again in the calling connection. So a reinstalled model,
+  `CREATE OR REPLACE TABLE` (on a table read by any file the model
+  imports), or another connection's temporary table means a recompile.
+  `malloy sources`, `malloy describe` and `malloy install` always compile
+  afresh.
 - **Running.** `malloy()` hands DuckDB the generated SQL as a subquery (the
   same mechanism as DuckDB's `query()` function), and DuckDB plans and runs
   it.
@@ -155,7 +158,7 @@ node bundle/build.mjs /path/to/malloy /path/to/malloyyo
 |---|---|
 | `src/malloy_extension.cpp` | Table functions, the session model, registration |
 | `src/malloy_statements.cpp` | Recognizing and rewriting Malloy statements and `%{ }%` |
-| `src/malloy_store.cpp` | Installed models: the `malloy.files` and `malloy.sources` tables |
+| `src/malloy_store.cpp` | Installed models and their cache keys: the `malloy.files`, `malloy.sources` and `malloy.tables` tables |
 | `src/malloy_engine.cpp` | QuickJS runtime, and the files and schemas the driver asks for |
 | `js/driver.js` | The Malloy host: Runtime, model cache, and the extension's commands |
 | `js/malloy-embedded.js` | Malloy and malloyyo's engine core as one script (generated; see `js/BUNDLE_SOURCE`) |

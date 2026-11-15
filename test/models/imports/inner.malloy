@@ -1,0 +1,1 @@
+source: inner_src is duckdb.table('imported_t')
