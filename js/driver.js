@@ -5,6 +5,8 @@
 //   __malloyHost.readURL(url)      -> the file's text
 //   __malloyHost.describe(sqlFrom) -> JSON: [[column_name, duckdb_type], ...]
 //                                     for `SELECT * FROM <sqlFrom>`
+//   __malloyHost.modelKeys(url)    -> JSON: the cache keys install wrote for
+//                                     the installed model `url` belongs to
 //
 // Both throw on failure.
 //
@@ -56,47 +58,81 @@
   };
   const connection = new duckdb.HostDuckDBConnection(CONNECTION, connectionHost);
 
+  // Install wrote cache keys for each installed model: its files' digests
+  // and the tables its compile described (malloy.files.digest,
+  // malloy.tables). They are fetched once per call to the driver, one host
+  // round trip per model, as are table schemas; both are dropped when the
+  // call ends, so every call sees the database as it is.
+  const STORE_SCHEME = 'malloy-installed://';
+  let storeKeys = new Map(); // FileURL -> {files: {url: md5}, tables: [from]}
+  let schemas = new Map(); // from -> DESCRIBE JSON, or a marker if it fails
+  function forgetCallState() {
+    storeKeys = new Map();
+    schemas = new Map();
+  }
+  function installedKeys(url) {
+    let keys = storeKeys.get(url);
+    if (!keys) {
+      keys = JSON.parse(host.modelKeys(url));
+      storeKeys.set(url, keys);
+      for (const file of Object.keys(keys.files)) storeKeys.set(file, keys);
+    }
+    return keys;
+  }
+  function schemaOf(from) {
+    if (!schemas.has(from)) {
+      let json;
+      try {
+        json = host.describe(from);
+      } catch (e) {
+        json = `(cannot describe: ${e.message})`;
+      }
+      schemas.set(from, json);
+    }
+    return schemas.get(from);
+  }
+
+  // The tables and SQL sources a model's compile described, by model URL,
+  // for models that were not installed (the session model, a file on disk).
+  const modelTables = new Map();
+  function tablesFor(url) {
+    return url.startsWith(STORE_SCHEME) ? installedKeys(url).tables : modelTables.get(url) || [];
+  }
+
+  // A file's invalidation key for Malloy's CacheManager: what the file says
+  // (install's digest, else a hash of its text), then what the tables of
+  // the model at that URL look like now, bound in the caller's connection.
+  // A cached model is reused only while every file's key is unchanged, so a
+  // reinstalled model, CREATE OR REPLACE TABLE, or another connection's
+  // temporary table by the same name all mean a recompile.
+  function invalidationKey(url, contents) {
+    let base;
+    if (inMemory.has(url)) base = hash(inMemory.get(url));
+    else if (url.startsWith(STORE_SCHEME) && installedKeys(url).files[url]) base = installedKeys(url).files[url];
+    else base = hash(contents ?? host.readURL(url));
+    return `${base} ${hash(tablesFor(url).map(schemaOf).join('\n'))}`;
+  }
+
+  const urlReader = {
+    async readURL(url) {
+      const u = url.toString();
+      const contents = inMemory.has(u) ? inMemory.get(u) : host.readURL(u);
+      if (recording) {
+        if (u === recording.url) recording.read = true;
+        if (!inMemory.has(u)) recording.files.set(u, contents);
+      }
+      return {contents, invalidationKey: invalidationKey(u, contents)};
+    },
+    async getInvalidationKey(url) {
+      return invalidationKey(url.toString());
+    },
+  };
+
   const runtime = new malloy.Runtime({
     connection,
-    urlReader: {
-      async readURL(url) {
-        const u = url.toString();
-        const contents = inMemory.has(u) ? inMemory.get(u) : host.readURL(u);
-        if (recording && !inMemory.has(u)) recording.files.set(u, contents);
-        return {contents, invalidationKey: hash(contents)};
-      },
-    },
+    urlReader,
+    cacheManager: new malloy.CacheManager(new malloy.InMemoryModelCache()),
   });
-
-  // Compiled models, kept across calls. A model depends on the files it
-  // read and on the schemas of the tables and SQL sources it described;
-  // both can change between statements (CREATE OR REPLACE, ATTACH, another
-  // connection's temporary table), so a hit re-reads and re-describes them,
-  // which is cheap next to compiling, and recompiles if anything differs.
-  const models = new Map(); // key -> {materializer, files, tables}
-  const MAX_MODELS = 32;
-
-  function stillValid(entry) {
-    for (const [url, contents] of entry.files) {
-      let now;
-      try {
-        now = host.readURL(url);
-      } catch (e) {
-        return false;
-      }
-      if (now !== contents) return false;
-    }
-    for (const [from, json] of entry.tables) {
-      let now;
-      try {
-        now = host.describe(from);
-      } catch (e) {
-        return false;
-      }
-      if (now !== json) return false;
-    }
-    return true;
-  }
 
   // Every compile describes its tables again, in the caller's context, so
   // that what it records is current. `refreshSchemaCache` takes a time; an
@@ -119,28 +155,21 @@
     }
   }
 
-  // The compiled model at `modelURL`, from the cache when nothing it
-  // depends on has changed.
+  // The compiled model at `modelURL`. CacheManager returns it from the
+  // cache while every file's invalidation key is unchanged; when it
+  // compiles instead, the tables the compile described are recorded for the
+  // model's next key.
   async function loadModel(modelURL, modelText) {
-    const key = `${modelURL}\u0000${typeof modelText === 'string' ? hash(modelText) : ''}`;
-    const hit = models.get(key);
-    if (hit && stillValid(hit)) {
-      models.delete(key);
-      models.set(key, hit); // most recently used last
-      return hit.materializer;
-    }
-    models.delete(key);
     const materializer = runtime.loadModel(new URL(modelURL), refresh());
-    const seen = (recording = {files: new Map(), tables: new Map()});
+    const seen = (recording = {url: modelURL, read: false, files: new Map(), tables: new Map()});
     try {
       await withModel(modelURL, modelText, () => materializer.getModel());
     } catch (e) {
-      fail(e); // not cached: the next call compiles again
+      fail(e);
     } finally {
       recording = null;
     }
-    models.set(key, {materializer, files: seen.files, tables: seen.tables});
-    while (models.size > MAX_MODELS) models.delete(models.keys().next().value);
+    if (seen.read) modelTables.set(modelURL, [...seen.tables.keys()]);
     return materializer;
   }
 
@@ -439,13 +468,19 @@
     //   file    <url> <contents>   every file the compile read
     //   entry   <kind> <name>      every source and named query it exports
     //   warning <message>          a source reading a file by a relative path
+    //   table   <from>             every table and SQL source it described
     // For `malloy install` and `malloy check`.
     async collect(modelURL) {
-      // Always a fresh compile: what matters is every file and table it reads.
-      recording = {files: new Map(), tables: new Map()};
+      // Always a fresh compile, without the cache: what matters is every file
+      // and table it reads, which install records as the model's cache keys.
+      recording = {url: modelURL, read: false, files: new Map(), tables: new Map()};
       let modelDef;
       try {
-        modelDef = (await runtime.loadModel(new URL(modelURL), refresh()).getModel())._modelDef;
+        const fresh = new malloy.Runtime({
+          connection: new duckdb.HostDuckDBConnection(CONNECTION, connectionHost),
+          urlReader,
+        });
+        modelDef = (await fresh.loadModel(new URL(modelURL)).getModel())._modelDef;
       } catch (e) {
         fail(e);
       } finally {
@@ -460,7 +495,17 @@
         const def = modelDef.contents[name];
         return ['entry', def && def.type === 'query' ? 'query' : 'source', name];
       });
-      return listing([...files, ...entries, ...warnings]);
+      const tables = [...seen.tables.keys()].map(table => ['table', table]);
+      return listing([...files, ...entries, ...warnings, ...tables]);
     },
   };
+
+  // Each call sees the database as it is: install's keys and table schemas
+  // are fetched afresh for it.
+  for (const [name, fn] of Object.entries(globalThis.malloyDuckDB)) {
+    globalThis.malloyDuckDB[name] = (...args) => {
+      forgetCallState();
+      return fn(...args);
+    };
+  }
 })();

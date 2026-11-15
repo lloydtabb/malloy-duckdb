@@ -109,7 +109,17 @@ void CreateTables(Connection &con, const string &catalog) {
 	Run(con, "CREATE TABLE IF NOT EXISTS " + Table(catalog, "files") +
 	             " (model VARCHAR, path VARCHAR, contents VARCHAR, installed_from VARCHAR, installed_at TIMESTAMP)");
 	Run(con, "CREATE TABLE IF NOT EXISTS " + Table(catalog, "sources") + " (name VARCHAR, kind VARCHAR, model VARCHAR)");
+	// Added after the first release: older stores gain them here.
+	Run(con, "ALTER TABLE " + Table(catalog, "files") + " ADD COLUMN IF NOT EXISTS digest VARCHAR");
+	Run(con, "CREATE TABLE IF NOT EXISTS " + Table(catalog, "tables") + " (model VARCHAR, sql_from VARCHAR)");
 }
+
+//! (catalog, model, path) of a FileURL.
+struct FileAddress {
+	string catalog;
+	string model;
+	string path;
+};
 
 bool HasTables(Connection &con, const string &catalog) {
 	auto result = Execute(con,
@@ -119,11 +129,30 @@ bool HasTables(Connection &con, const string &catalog) {
 	return Rows(*result)[0][0] == "2";
 }
 
+//! Whether malloy.files has the digest column, which stores from before
+//! cache keys lack until their next install.
+bool HasDigests(Connection &con, const string &catalog) {
+	auto result = Execute(con,
+	                      "SELECT count(*) FROM duckdb_columns() WHERE database_name = ? AND schema_name = 'malloy' "
+	                      "AND table_name = 'files' AND column_name = 'digest'",
+	                      Value(catalog));
+	return Rows(*result)[0][0] == "1";
+}
+
+bool HasKeyTables(Connection &con, const string &catalog) {
+	auto result = Execute(con,
+	                      "SELECT count(*) FROM duckdb_tables() WHERE database_name = ? AND schema_name = 'malloy' "
+	                      "AND table_name = 'tables'",
+	                      Value(catalog));
+	return Rows(*result)[0][0] == "1";
+}
+
 void DeleteModelFilesIfUnused(Connection &con, const string &catalog, const string &model) {
-	Execute(con,
-	        "DELETE FROM " + Table(catalog, "files") + " WHERE model = ? AND NOT EXISTS (SELECT 1 FROM " +
-	            Table(catalog, "sources") + " WHERE model = ?)",
-	        Value(model), Value(model));
+	auto unused = " WHERE model = ? AND NOT EXISTS (SELECT 1 FROM " + Table(catalog, "sources") + " WHERE model = ?)";
+	if (HasKeyTables(con, catalog)) {
+		Execute(con, "DELETE FROM " + Table(catalog, "tables") + unused, Value(model), Value(model));
+	}
+	Execute(con, "DELETE FROM " + Table(catalog, "files") + unused, Value(model), Value(model));
 }
 
 } // namespace
@@ -155,16 +184,68 @@ bool MalloyStore::IsFileURL(const string &url) {
 	return StringUtil::StartsWith(url, FILE_SCHEME);
 }
 
-string MalloyStore::ReadFile(ClientContext &context, const string &url) {
+static FileAddress Address(const string &url) {
 	auto rest = url.substr(strlen(FILE_SCHEME));
 	auto first = rest.find('/');
 	auto second = first == string::npos ? string::npos : rest.find('/', first + 1);
 	if (second == string::npos) {
 		throw IOException("malloy: not an installed model file: %s", url);
 	}
-	auto catalog = Decode(rest.substr(0, first));
-	auto model = Decode(rest.substr(first + 1, second - first - 1));
-	auto path = rest.substr(second + 1);
+	return {Decode(rest.substr(0, first)), Decode(rest.substr(first + 1, second - first - 1)), rest.substr(second + 1)};
+}
+
+InstalledKeys MalloyStore::Keys(ClientContext &context, const string &url) {
+	auto address = Address(url);
+	InstalledKeys keys;
+	Connection con(*context.db);
+	// One query in the common case: this runs on every compile of a query
+	// against an installed model, where catalog lookups would cost more
+	// than the query itself.
+	try {
+		auto result = Execute(con,
+		                      "SELECT 'file', path, coalesce(digest, '') FROM " + Table(address.catalog, "files") +
+		                          " WHERE model = ? UNION ALL SELECT 'table', sql_from, '' FROM " +
+		                          Table(address.catalog, "tables") + " WHERE model = ?",
+		                      Value(address.model), Value(address.model));
+		for (auto &row : Rows(*result)) {
+			if (row[0] == "file") {
+				keys.files.emplace_back(FileURL(address.catalog, address.model, row[1]), row[2]);
+			} else {
+				keys.tables.push_back(row[1]);
+			}
+		}
+		return keys;
+	} catch (std::exception &) {
+		// A store from before cache keys, or none at all: look before reading.
+	}
+	if (!HasTables(con, address.catalog)) {
+		throw IOException("malloy: no models are installed in %s", address.catalog);
+	}
+	auto digest = HasDigests(con, address.catalog) ? "coalesce(digest, '')" : "''";
+	auto files = Execute(con,
+	                     "SELECT path, " + string(digest) + " FROM " + Table(address.catalog, "files") +
+	                         " WHERE model = ? ORDER BY path",
+	                     Value(address.model));
+	for (auto &row : Rows(*files)) {
+		keys.files.emplace_back(FileURL(address.catalog, address.model, row[0]), row[1]);
+	}
+	if (HasKeyTables(con, address.catalog)) {
+		auto tables = Execute(con,
+		                      "SELECT sql_from FROM " + Table(address.catalog, "tables") +
+		                          " WHERE model = ? ORDER BY sql_from",
+		                      Value(address.model));
+		for (auto &row : Rows(*tables)) {
+			keys.tables.push_back(row[0]);
+		}
+	}
+	return keys;
+}
+
+string MalloyStore::ReadFile(ClientContext &context, const string &url) {
+	auto address = Address(url);
+	auto &catalog = address.catalog;
+	auto &model = address.model;
+	auto &path = address.path;
 
 	Connection con(*context.db);
 	if (!HasTables(con, catalog)) {
@@ -195,9 +276,18 @@ void MalloyStore::Install(ClientContext &context, const string &catalog, const I
 		}
 		Execute(con, "DELETE FROM " + Table(catalog, "sources") + " WHERE model = ?", Value(plan.model));
 		Execute(con, "DELETE FROM " + Table(catalog, "files") + " WHERE model = ?", Value(plan.model));
+		Execute(con, "DELETE FROM " + Table(catalog, "tables") + " WHERE model = ?", Value(plan.model));
 		for (auto &file : plan.files) {
-			Execute(con, "INSERT INTO " + Table(catalog, "files") + " VALUES (?, ?, ?, ?, now()::TIMESTAMP)",
-			        Value(plan.model), Value(file.path), Value(file.contents), Value(file.installed_from));
+			Execute(con,
+			        "INSERT INTO " + Table(catalog, "files") +
+			            " (model, path, contents, installed_from, installed_at, digest)"
+			            " VALUES (?, ?, ?, ?, now()::TIMESTAMP, md5(?))",
+			        Value(plan.model), Value(file.path), Value(file.contents), Value(file.installed_from),
+			        Value(file.contents));
+		}
+		for (auto &table : plan.tables) {
+			Execute(con, "INSERT INTO " + Table(catalog, "tables") + " VALUES (?, ?)", Value(plan.model),
+			        Value(table));
 		}
 		for (auto &entry : plan.entries) {
 			Execute(con, "INSERT INTO " + Table(catalog, "sources") + " VALUES (?, ?, ?)", Value(entry.second),
@@ -248,6 +338,9 @@ vector<string> MalloyStore::UninstallModel(ClientContext &context, const string 
 	try {
 		Execute(con, "DELETE FROM " + Table(catalog, "sources") + " WHERE model = ?", Value(name));
 		Execute(con, "DELETE FROM " + Table(catalog, "files") + " WHERE model = ?", Value(name));
+		if (HasKeyTables(con, catalog)) {
+			Execute(con, "DELETE FROM " + Table(catalog, "tables") + " WHERE model = ?", Value(name));
+		}
 		Run(con, "COMMIT");
 	} catch (...) {
 		con.Query("ROLLBACK");

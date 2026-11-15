@@ -454,6 +454,8 @@ static InstallPlan PlanInstall(ClientContext &context, const string &url, vector
 			plan.entries.emplace_back(row[1], row[2]);
 		} else if (row[0] == "warning" && row.size() >= 2) {
 			warnings.push_back(row[1]);
+		} else if (row[0] == "table" && row.size() >= 2) {
+			plan.tables.push_back(row[1]);
 		}
 	}
 	if (files.empty()) {

@@ -189,6 +189,30 @@ JSValue HostDescribe(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv)
 	}
 }
 
+//! The cache keys install wrote for an installed model, as JSON:
+//! {"files": {"<url>": "<md5>", ...}, "tables": ["<from>", ...]}.
+JSValue HostModelKeys(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+	auto call = static_cast<HostCall *>(JS_GetContextOpaque(ctx));
+	try {
+		if (!call || !call->context || argc < 1) {
+			throw InternalException("malloy: modelKeys called outside a compile");
+		}
+		auto keys = MalloyStore::Keys(*call->context, JSStringArg(ctx, argv[0]));
+		string json = "{\"files\":{";
+		for (idx_t i = 0; i < keys.files.size(); i++) {
+			json += (i ? "," : "") + JSONString(keys.files[i].first) + ":" + JSONString(keys.files[i].second);
+		}
+		json += "},\"tables\":[";
+		for (idx_t i = 0; i < keys.tables.size(); i++) {
+			json += (i ? "," : "") + JSONString(keys.tables[i]);
+		}
+		json += "]}";
+		return JS_NewStringLen(ctx, json.c_str(), json.size());
+	} catch (std::exception &ex) {
+		return ThrowToJS(ctx, ex);
+	}
+}
+
 class Runtime {
 public:
 	Runtime() {
@@ -207,6 +231,7 @@ public:
 		JSValue host = JS_NewObject(ctx);
 		JS_SetPropertyStr(ctx, host, "readURL", JS_NewCFunction(ctx, HostReadURL, "readURL", 1));
 		JS_SetPropertyStr(ctx, host, "describe", JS_NewCFunction(ctx, HostDescribe, "describe", 1));
+		JS_SetPropertyStr(ctx, host, "modelKeys", JS_NewCFunction(ctx, HostModelKeys, "modelKeys", 1));
 		JS_SetPropertyStr(ctx, global, "__malloyHost", host);
 		JS_FreeValue(ctx, global);
 

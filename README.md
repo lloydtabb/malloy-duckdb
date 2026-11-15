@@ -58,11 +58,12 @@ malloyyo's `list_sources` and `describe_source` do.
   Malloy's DuckDB connection code turns those into Malloy types. The Runtime
   API returns promises; the C++ side runs QuickJS's job queue until each
   one settles.
-- **Caching.** Compiled models are kept between statements. A cached model
-  remembers the files it read and the schema of every table and SQL source
-  it used; before it is reused, the files are read and the schemas bound
-  again, and any difference means a recompile. So `CREATE OR REPLACE TABLE`,
-  a reinstalled model, or another connection's temporary table are seen.
+- **Caching.** Compiled models are kept between statements by Malloy's
+  `CacheManager`. A file's cache key is what it says (for an installed
+  model, the digest `malloy install` wrote; otherwise a hash of its text)
+  plus the schemas of the tables its model reads, bound again in the
+  calling connection. So a reinstalled model, `CREATE OR REPLACE TABLE`,
+  or another connection's temporary table means a recompile.
 - **Running.** `malloy()` hands DuckDB the generated SQL as a subquery (the
   same mechanism as DuckDB's `query()` function), and DuckDB plans and runs
   it.
@@ -70,9 +71,10 @@ malloyyo's `list_sources` and `describe_source` do.
   imported and defined, and compiles queries against them. A query that
   names an installed source also gets an `import` of that source's model,
   so only the models a query uses are compiled.
-- **Installed models** are rows in `malloy.files` and `malloy.sources`
-  (`src/malloy_store.cpp`), read and written through a second connection to
-  the same database.
+- **Installed models** are rows in `malloy.files`, `malloy.sources` and
+  `malloy.tables` (`src/malloy_store.cpp`), read and written through a
+  second connection to the same database. Install also writes each file's
+  digest and the tables the model reads: the model's cache keys.
 
 ## Status
 
@@ -88,9 +90,6 @@ Compile speed in QuickJS, on 4 cores with the two-file flights model:
 
 Known gaps:
 
-- Checking a cached model reads each of its installed files with a query
-  of its own, about 4–5 ms each; one query for all of a model's files would
-  be faster.
 - The session model belongs to one connection and ends with it.
 - Not yet tried with MotherDuck beyond a simple query.
 - An error in a Malloy statement is reported with the SQL it was rewritten
