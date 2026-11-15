@@ -43,6 +43,9 @@
   // the caller's own connection and transaction.
   const DESCRIBE = /^DESCRIBE SELECT \* FROM ([\s\S]*)$/;
   const connection = new duckdb.HostDuckDBConnection(CONNECTION, {
+    // Names the database for Malloy's persist manifests, which this
+    // extension doesn't use; every database answers to the same digest.
+    digest: 'malloy-duckdb',
     query(sql) {
       const m = DESCRIBE.exec(sql.trim());
       if (!m) throw new Error(`malloy-duckdb runs no SQL while compiling: ${sql}`);
