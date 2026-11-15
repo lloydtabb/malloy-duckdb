@@ -355,7 +355,7 @@ MALLOY_BIND(MalloySourcesBind) {
 		from[entry.first] = "session";
 	}
 	auto result = Columns(return_types, names,
-	                      {"name", "kind", "from", "description", "primary_key", "filters", "joins", "fields"});
+	                      {"name", "kind", "from", "description", "primary_key", "joins", "fields"});
 	if (from.empty()) {
 		return std::move(result);
 	}
@@ -366,10 +366,10 @@ MALLOY_BIND(MalloySourcesBind) {
 	}
 	try {
 		for (auto &row : MalloyEngine::ListSources(context, SessionModel(context, every_name))) {
-			if (row.size() < 7 || !from.count(row[1])) {
+			if (row.size() < 6 || !from.count(row[1])) {
 				continue;
 			}
-			result->rows.push_back({row[1], row[0], from[row[1]], row[2], row[3], row[4], row[5], row[6]});
+			result->rows.push_back({row[1], row[0], from[row[1]], row[2], row[3], row[4], row[5]});
 		}
 	} catch (std::exception &ex) {
 		// Still list what is there, and say why there is no more.
@@ -400,7 +400,7 @@ MALLOY_BIND(MalloyDescribeBind) {
 	if (!known) {
 		throw BinderException("Malloy: no source or query named '%s'; malloy sources lists them", name);
 	}
-	auto result = Columns(return_types, names, {"name", "kind", "type", "grain", "description", "annotations", "definition", "usage", "example"});
+	auto result = Columns(return_types, names, {"name", "kind", "type", "fans_out", "description", "instructions", "expression"});
 	result->rows = MalloyEngine::Describe(context, SessionModel(context, MalloyName(name)), name);
 	return std::move(result);
 }

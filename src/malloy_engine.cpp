@@ -18,8 +18,6 @@ extern "C" {
 // NUL-terminated; the length excludes the NUL, as JS_Eval wants.
 extern const unsigned char MALLOY_EMBEDDED_JS[];
 extern const size_t MALLOY_EMBEDDED_JS_LEN;
-extern const unsigned char MALLOY_CATALOG_JS[];
-extern const size_t MALLOY_CATALOG_JS_LEN;
 extern const unsigned char MALLOY_DRIVER_JS[];
 extern const size_t MALLOY_DRIVER_JS_LEN;
 extern const unsigned char MALLOY_HELP_JS[];
@@ -213,7 +211,6 @@ public:
 		JS_FreeValue(ctx, global);
 
 		Eval(reinterpret_cast<const char *>(MALLOY_EMBEDDED_JS), MALLOY_EMBEDDED_JS_LEN, "malloy-embedded.js");
-		Eval(reinterpret_cast<const char *>(MALLOY_CATALOG_JS), MALLOY_CATALOG_JS_LEN, "catalog.js");
 		Eval(reinterpret_cast<const char *>(MALLOY_HELP_JS), MALLOY_HELP_JS_LEN, "help-content.js");
 		Eval(reinterpret_cast<const char *>(MALLOY_DRIVER_JS), MALLOY_DRIVER_JS_LEN, "driver.js");
 	}

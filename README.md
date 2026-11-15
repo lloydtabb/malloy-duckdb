@@ -37,10 +37,12 @@ on its own lists the commands. In the DuckDB CLI, end each statement with
 
 The Malloy compiler is TypeScript. This extension embeds
 [QuickJS-ng](https://github.com/quickjs-ng/quickjs), a small JavaScript
-engine written in C, and runs Malloy in it as one bundled script
-(`js/malloy-embedded.js`, built by Malloy's `packages/malloy-embedded`). The
-bundle is Malloy's own npm packages, so the extension is an ordinary Malloy
-host: a `Runtime` with a URL reader and a DuckDB connection.
+engine written in C, and runs Malloy in it as one bundled script,
+`js/malloy-embedded.js`, built by `bundle/build.mjs`. The bundle holds
+Malloy's own packages, so the extension is an ordinary Malloy host (a
+`Runtime` with a URL reader and a DuckDB connection), and the core of
+malloyyo's MCP engine, so `malloy sources` and `malloy describe` answer as
+malloyyo's `list_sources` and `describe_source` do.
 
 - **Recognizing Malloy.** DuckDB's parser override hook offers the
   extension every script before DuckDB parses it. `src/malloy_statements.cpp`
@@ -139,10 +141,13 @@ GEN=ninja make release
 make test
 ```
 
-To pick up a newer Malloy, rebuild the bundle from a Malloy checkout:
+To pick up a newer Malloy or malloyyo, rebuild the bundle from built
+checkouts of both (Malloy: `npm run build`; malloyyo: `npm run gen -w
+packages/mcp-engine`):
 
 ```sh
-scripts/update-bundle.sh /path/to/malloy
+(cd bundle && npm install)
+node bundle/build.mjs /path/to/malloy /path/to/malloyyo
 ```
 
 ## Layout
@@ -154,8 +159,8 @@ scripts/update-bundle.sh /path/to/malloy
 | `src/malloy_store.cpp` | Installed models: the `malloy.files` and `malloy.sources` tables |
 | `src/malloy_engine.cpp` | QuickJS runtime, and the files and schemas the driver asks for |
 | `js/driver.js` | The Malloy host: Runtime, model cache, and the extension's commands |
-| `js/catalog.js` | What `malloy sources` and `malloy describe` show about a model |
-| `js/malloy-embedded.js` | The Malloy compiler bundle (generated; see `js/BUNDLE_SOURCE`) |
+| `js/malloy-embedded.js` | Malloy and malloyyo's engine core as one script (generated; see `js/BUNDLE_SOURCE`) |
+| `bundle/` | Builds `js/malloy-embedded.js`, with the web-platform globals QuickJS lacks |
 | `cmake/embed_js.cmake` | Compiles the JavaScript into the extension as byte arrays |
 | `test/sql/malloy.test` | SQL tests; models in `test/models/` |
 | `scripts/run-tests-cli.py` | Runs `test/sql/malloy.test` through the DuckDB CLI, without a full build |

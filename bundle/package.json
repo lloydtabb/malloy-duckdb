@@ -1,0 +1,9 @@
+{
+  "private": true,
+  "type": "module",
+  "description": "Builds js/malloy-embedded.js; see build.mjs",
+  "devDependencies": {
+    "esbuild": "0.28.1",
+    "whatwg-url": "^14.2.0"
+  }
+}

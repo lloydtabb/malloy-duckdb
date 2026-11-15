@@ -20,7 +20,7 @@
 (function () {
   'use strict';
   const host = globalThis.__malloyHost;
-  const {malloy, duckdb} = globalThis.malloyEmbedded;
+  const {malloy, duckdb, engine} = globalThis.malloyEmbedded;
   const CONNECTION = 'duckdb';
 
   // A small, fast string hash: invalidation keys for model text.
@@ -42,7 +42,7 @@
   // `DESCRIBE SELECT * FROM <x>`, which the host answers by binding <x> in
   // the caller's own connection and transaction.
   const DESCRIBE = /^DESCRIBE SELECT \* FROM ([\s\S]*)$/;
-  const connection = new duckdb.HostDuckDBConnection(CONNECTION, {
+  const connectionHost = {
     // Names the database for Malloy's persist manifests, which this
     // extension doesn't use; every database answers to the same digest.
     digest: 'malloy-duckdb',
@@ -53,7 +53,8 @@
       if (recording) recording.tables.set(m[1], json);
       return JSON.parse(json).map(([column_name, column_type]) => ({column_name, column_type}));
     },
-  });
+  };
+  const connection = new duckdb.HostDuckDBConnection(CONNECTION, connectionHost);
 
   const runtime = new malloy.Runtime({
     connection,
@@ -172,11 +173,56 @@
     }
   }
 
-  // Every source and named query the model can see, described: see
-  // js/catalog.js.
-  async function catalog(modelURL, modelText) {
-    const model = await (await loadModel(modelURL, modelText)).getModel();
-    return globalThis.malloyCatalog.catalogOf(model._modelDef).entries;
+  // malloyyo's MCP engine answers `malloy sources` and `malloy describe`, as
+  // its list_sources and describe_source do, through this host. Each call
+  // gets its own connection: the engine compiles through the Runtime it is
+  // handed, and a fresh schema cache describes every table in the caller's
+  // current context.
+  function engineHost(modelURL, modelText) {
+    const readSource = href =>
+      inMemory.has(href) ? inMemory.get(href) : typeof modelText === 'string' && href === modelURL ? modelText : host.readURL(href);
+    return {
+      withModel: (ref, fn) =>
+        withModel(modelURL, modelText, () =>
+          fn({
+            runtime: new malloy.Runtime({
+              connection: new duckdb.HostDuckDBConnection(CONNECTION, connectionHost),
+              urlReader: runtime.urlReader,
+            }),
+            entry: new URL(modelURL),
+            readSource,
+          })
+        ),
+    };
+  }
+
+  // The engine's tool, called as an MCP client would call it.
+  async function engineTool(name, modelURL, modelText, args) {
+    const tool = engine.exploreSurface(engineHost(modelURL, modelText)).tools.find(t => t.name === name);
+    const result = await tool.handler({...args, model_ref: modelURL});
+    if (!result.ok) {
+      const errors = (result.problems || []).filter(p => p.severity !== 'warning');
+      throw new Error(errors.map(p => p.message).join('\n') || `${name} failed`);
+    }
+    return result;
+  }
+
+  // The model as the engine compiles it: sources and named queries.
+  async function engineModel(modelURL, modelText) {
+    return engineHost(modelURL, modelText).withModel(modelURL, async m => {
+      const compiled = await engine.compile(m.runtime, m.entry, {readSource: m.readSource});
+      if (!compiled.ok) fail({problems: compiled.problems.map(p => ({...p, severity: p.severity ?? 'error'}))});
+      return compiled.model;
+    });
+  }
+
+  // A describe_source type as one line: a scalar's name, or a record's fields.
+  function typeText(type) {
+    if (typeof type === 'string') return type;
+    if (type && typeof type === 'object') {
+      return `{${Object.entries(type).map(([n, d]) => `${n} :: ${d.type === undefined ? 'array' : typeText(d.type)}`).join(', ')}}`;
+    }
+    return '';
   }
 
   // Everything a model can see: sources and named queries, imports included.
@@ -295,138 +341,66 @@
       return (await prepared(modelURL, queryText, modelText)).sql;
     },
 
-    // Rows of kind, name, description, primary_key, filters, joins, fields:
-    // every source and named query the model can see.
+    // Rows of kind, name, description, primary_key, joins, fields: every
+    // source and named query the model can see, as the engine compiles it.
     async listSources(modelURL, modelText) {
-      return listing(
-        (await catalog(modelURL, modelText)).map(e => {
-          const joins = e.fields
-            .filter(f => f.kind === 'join' && !f.path.includes('.'))
-            .map(f => `${f.path} (${f.type.replace(/^join_/, '')})`);
-          const own = e.fields.filter(f => !f.path.includes('.') && f.kind !== 'join');
-          const count = kind => own.filter(f => f.kind === kind).length;
-          const counts = [
-            [count('dimension'), 'dimension'],
-            [count('measure'), 'measure'],
-            [count('calculation'), 'calculation'],
-            [count('view'), 'view'],
-          ]
-            .filter(([n]) => n > 0)
-            .map(([n, word]) => `${n} ${word}${n === 1 ? '' : 's'}`);
-          return [
-            e.kind,
-            e.name,
-            e.description || '',
-            e.primary_key || '',
-            e.filters.join('; '),
-            joins.join(', '),
-            counts.join(', '),
-          ];
-        })
-      );
+      const model = await engineModel(modelURL, modelText);
+      const counts = groups =>
+        [
+          [groups.dimensions.length, 'dimension'],
+          [groups.measures.length, 'measure'],
+          [groups.views.length, 'view'],
+        ]
+          .filter(([n]) => n > 0)
+          .map(([n, word]) => `${n} ${word}${n === 1 ? '' : 's'}`)
+          .join(', ');
+      return listing([
+        ...Object.values(model.sources).map(s => [
+          'source',
+          s.name,
+          s.description || '',
+          s.primary_key || '',
+          s.joins.map(j => `${j.name} (${j.relationship})`).join(', '),
+          counts(s),
+        ]),
+        ...model.queries.map(q => ['query', q.name, q.description || '', '', '', '']),
+      ]);
     },
 
-    // Rows of path, kind, type, grain, description, definition, usage,
-    // example: every field of one source or named query, through its joins
-    // and nested data.
+    // Rows of name, kind, type, fans_out, description, instructions,
+    // expression: describe_source's answer, one row per field, join and view.
     async describe(modelURL, name, modelText) {
-      const entries = await catalog(modelURL, modelText);
-      const entry = entries.find(e => e.name === name);
-      if (!entry) {
-        const known = entries.map(e => e.name).sort().join(', ');
-        throw new Error(`No source or query named '${name}'` + (known ? `; defined: ${known}` : '; nothing is defined yet'));
-      }
-      return listing(
-        entry.fields.map(f => [
-          f.path,
-          f.kind,
-          f.type,
-          f.grain,
-          f.description || '',
-          (f.annotations || []).join(' '),
-          f.definition || '',
-          f.usage,
-          (f.examples || []).join('; '),
-        ])
-      );
-    },
-
-    // One row per line: a source or named query, compactly. Its own fields
-    // grouped by kind, then each join and nested array with its fields.
-    async describeText(modelURL, name, modelText) {
-      const entries = await catalog(modelURL, modelText);
-      const entry = entries.find(e => e.name === name);
-      if (!entry) {
-        const known = entries.map(e => e.name).sort().join(', ');
-        throw new Error(`No source or query named '${name}'` + (known ? `; defined: ${known}` : '; nothing is defined yet'));
-      }
-      // One-line annotations go on the field's line; a multi-line one (a
-      // block like #|(agent) ... |#) goes on the lines after it, indented.
-      const oneLine = text => !text.includes('\n');
-      const notes = f => {
-        const parts = [];
-        if (f.description) parts.push(`-- ${f.description}`);
-        for (const a of f.annotations || []) if (oneLine(a)) parts.push(a);
-        return parts.length ? '  ' + parts.join('  ') : '';
-      };
-      const blocks = (f, pad) =>
-        (f.annotations || [])
-          .filter(a => !oneLine(a))
-          .map(a => a.split('\n').map(l => `${pad}  ${l}`).join('\n'));
-      const line = f => {
-        const name = f.path.includes('.') ? f.path.slice(f.path.lastIndexOf('.') + 1) : f.path;
-        let text = name;
-        if (f.kind === 'dimension' || f.kind === 'calculation') text += ` :: ${f.type}`;
-        if (f.definition) text += ` = ${f.definition.replace(/\s+/g, ' ')}`;
-        return text + notes(f);
-      };
-      const lines = [];
-      lines.push(`${entry.kind} ${entry.name}${entry.description ? ' -- ' + entry.description : ''}`);
-      for (const a of entry.annotations || []) {
-        for (const l of a.split('\n')) lines.push(`  ${l}`);
-      }
-      if (entry.primary_key) lines.push(`  primary_key: ${entry.primary_key}`);
-      for (const f of entry.filters || []) lines.push(`  where: ${f}`);
-      for (const p of entry.parameters || []) lines.push(`  parameter: ${p}`);
-
-      const own = entry.fields.filter(f => !f.path.includes('.'));
-      const sections = entry.kind === 'query'
-        ? [['columns', own]]
-        : [
-            ['dimensions', own.filter(f => f.kind === 'dimension')],
-            ['measures', own.filter(f => f.kind === 'measure')],
-            ['calculations', own.filter(f => f.kind === 'calculation')],
-            ['views', own.filter(f => f.kind === 'view')],
-          ];
-      for (const [title, fields] of sections) {
-        if (!fields.length) continue;
-        lines.push(`${title}:`);
-        for (const f of fields) lines.push(`  ${line(f)}`, ...blocks(f, '  '));
-      }
-
-      // Joins and nested arrays as a tree: each with its fields, then the
-      // joins and arrays inside it.
-      const isNested = f => f.kind === 'join' || /\[\]$/.test(f.type);
-      const parentOf = path => (path.includes('.') ? path.slice(0, path.lastIndexOf('.')) : '');
-      const nested = entry.fields.filter(isNested);
-      const emit = (parent, depth) => {
-        for (const n of nested.filter(f => parentOf(f.path) === parent)) {
-          const pad = '  '.repeat(depth);
-          const kind = n.kind === 'join' ? n.type : `${n.type} (nested)`;
-          const example = (n.examples || [])[0];
-          lines.push(`${pad}${n.path} :: ${kind}${notes(n)}${example ? `  e.g. ${example}` : ''}`, ...blocks(n, pad));
-          for (const f of entry.fields) {
-            if (parentOf(f.path) !== n.path || isNested(f)) continue;
-            lines.push(`${pad}  ${line(f)}`, ...blocks(f, pad + '  '));
-          }
-          emit(n.path, depth + 1);
+      const r = await engineTool('describe_source', modelURL, modelText, {source: name});
+      const rows = [];
+      const fields = (schema, prefix, fans) => {
+        for (const [n, d] of Object.entries(schema.dimensions || {})) {
+          if (d.type === undefined) continue; // an array: its joins entry describes it
+          rows.push([prefix + n, 'dimension', typeText(d.type), fans, d.description || '', d.instructions || '', d.expression || '']);
+        }
+        for (const [n, d] of Object.entries(schema.measures || {})) {
+          rows.push([prefix + n, 'measure', typeText(d.type), fans, d.description || '', d.instructions || '', d.expression || '']);
         }
       };
-      if (nested.length) {
-        lines.push('joins and nested data:');
-        emit('', 1);
+      const root = r.described_source;
+      fields(root, '', 'false');
+      for (const [n, description] of Object.entries(root.views || {})) {
+        rows.push([n, 'view', 'view', 'false', description || '', '', '']);
       }
-      return listing(lines.map(l => [l]));
+      for (const [path, j] of Object.entries(r.joins || {})) {
+        const schema = j.source_def || (j.source && r.join_source_map[j.source]) || {};
+        const fans = j.fans_out ? 'true' : 'false';
+        rows.push([j.quoted_path || path, j.is_array ? 'array' : 'join', j.is_array ? 'array' : j.source || '', fans, schema.description || '', schema.instructions || '', j.code || '']);
+        fields(schema, `${j.quoted_path || path}.`, fans);
+      }
+      return listing(rows);
+    },
+
+    // describe_source's answer as an MCP client receives it, one row per
+    // line: the JSON, then the source's Malloy text.
+    async describeText(modelURL, name, modelText) {
+      const r = await engineTool('describe_source', modelURL, modelText, {source: name});
+      const blocks = engine.toContent(r).content.map(c => c.text);
+      return listing(blocks.join('\n\n').split('\n').map(line => [line]));
     },
 
     // A query's result metadata, as JSON, without running it: its SQL, its

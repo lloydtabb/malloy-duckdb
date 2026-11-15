@@ -152,33 +152,29 @@ malloy import 'test/models/movies.malloy';
 imported 1 source (movies)
 
 query IIII
-SELECT name, kind, type, grain FROM malloy_describe('movies');
+SELECT name, kind, type, fans_out FROM malloy_describe('movies');
 ----
-title	dimension	string	(empty)
-movie_count	measure	number	(empty)
-genres	dimension	string[]	(empty)
-directors	dimension	{name :: string, born :: number}[]	(empty)
-by_genre	view	view	(empty)
-by_genre_each	view	view	(empty)
-by_director	view	view	(empty)
-genres.each	dimension	string	genres
-directors.name	dimension	string	directors
-directors.born	dimension	number	directors
+title	dimension	string	false
+movie_count	measure	number	false
+by_genre	view	view	false
+by_genre_each	view	view	false
+by_director	view	view	false
+genres	array	array	true
+genres.each	dimension	string	true
+directors	array	array	true
+directors.name	dimension	string	true
+directors.born	dimension	number	true
 
-query II
-SELECT definition, example FROM malloy_describe('movies') WHERE name = 'movie_count';
-----
-count()	aggregate: movie_count
-
-# malloy describe: compact, one line per field, grouped
 query I
-SELECT line FROM malloy_describe_text('movies') WHERE line IN ('source movies', 'measures:', '  movie_count = count()', 'joins and nested data:', '    each :: string');
+SELECT expression FROM malloy_describe('movies') WHERE name = 'movie_count';
 ----
-source movies
-measures:
-  movie_count = count()
-joins and nested data:
-    each :: string
+count()
+
+# malloy describe: malloyyo's describe_source answer, the JSON then the source's Malloy
+query I
+SELECT count(*) FROM malloy_describe_text('movies') WHERE line IN ('  "source": "movies",', 'source: movies is duckdb.table(''movies'') extend {');
+----
+2
 
 # malloy compile: a query's result metadata, as JSON
 query II
@@ -257,15 +253,15 @@ top_carriers	query	memory: airline/airline.malloy
 query III
 SELECT description, primary_key, joins FROM malloy_sources() WHERE name = 'airline_flights';
 ----
-Flights, one row per flight	(empty)	carrier_names (one)
+Flights, one row per flight	(empty)	carrier_names (many_to_one)
 
 query IIII
-SELECT name, kind, description, example FROM malloy_describe('airline_flights') WHERE name LIKE 'carrier_names%';
+SELECT name, kind, description, expression FROM malloy_describe('airline_flights') WHERE name LIKE 'carrier_names%';
 ----
-carrier_names	join	Carrier names, one row per carrier code	group_by: carrier_names.code
-carrier_names.code	dimension	(empty)	group_by: carrier_names.code; aggregate: n is count(carrier_names.code)
-carrier_names.nickname	dimension	(empty)	group_by: carrier_names.nickname; aggregate: n is count(carrier_names.nickname)
-carrier_names.shouted	dimension	The carrier's name in capitals	group_by: carrier_names.shouted; aggregate: n is count(carrier_names.shouted)
+carrier_names	join	Carrier names, one row per carrier code	join_one: carrier_names with carrier
+carrier_names.code	dimension	(empty)	(empty)
+carrier_names.nickname	dimension	(empty)	(empty)
+carrier_names.shouted	dimension	The carrier's name in capitals	upper(nickname)
 
 query II
 run: airline_flights -> by_carrier + { order_by: nickname };
