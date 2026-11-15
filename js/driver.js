@@ -398,7 +398,9 @@
     // describe_source's answer as an MCP client receives it, one row per
     // line: the JSON, then the source's Malloy text.
     async describeText(modelURL, name, modelText) {
-      const r = await engineTool('describe_source', modelURL, modelText, {source: name});
+      // Without `guidance`: it tells an MCP client how to use the query tool and
+      // share links, which have no counterpart inside DuckDB.
+      const {guidance, ...r} = await engineTool('describe_source', modelURL, modelText, {source: name});
       const blocks = engine.toContent(r).content.map(c => c.text);
       return listing(blocks.join('\n\n').split('\n').map(line => [line]));
     },
