@@ -152,7 +152,7 @@ string ReadURL(ClientContext &context, const string &url) {
 //! connection and transaction, so temporary and uncommitted objects are
 //! visible.
 string Describe(ClientContext &context, const string &from) {
-	Parser parser(context.GetParserOptions());
+	Parser parser(context);
 	parser.ParseQuery("SELECT * FROM " + from);
 	if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
 		throw BinderException("malloy: could not read the schema of %s", from);
@@ -164,7 +164,7 @@ string Describe(ClientContext &context, const string &from) {
 		if (i > 0) {
 			json += ",";
 		}
-		json += "[" + JSONString(bound.names[i]) + "," + JSONString(bound.types[i].ToString()) + "]";
+		json += "[" + JSONString(bound.names[i].GetIdentifierName()) + "," + JSONString(bound.types[i].ToString()) + "]";
 	}
 	return json + "]";
 }
@@ -517,7 +517,7 @@ string MalloyModelURL(ClientContext &context, const string &location) {
 	}
 	path = fs.ConvertSeparators(path);
 #ifdef _WIN32
-	StringUtil::ReplaceAll(path, "\\", "/");
+	path = StringUtil::Replace(path, "\\", "/");
 	return "file:///" + path;
 #else
 	return "file://" + path;

@@ -4,7 +4,7 @@ A DuckDB extension for using [Malloy](https://www.malloydata.dev) inside
 DuckDB SQL. Install a Malloy model into a database, and anyone who opens it
 can query the model's sources.
 
-> **Status: early prototype.** Works against DuckDB v1.5.6 on Linux and
+> **Status: early prototype.** Works against DuckDB v2.0.0 on Linux and
 > macOS; see [Status](#status).
 
 ```sql
@@ -83,7 +83,7 @@ malloyyo's `list_sources` and `describe_source` do.
 
 ## Status
 
-Early prototype. Built and tested against the official DuckDB v1.5.6 CLI
+Early prototype. Built and tested against the official DuckDB v2.0.0 CLI
 on Linux x86-64 and macOS arm64; other platforms not yet tried.
 
 Compile speed in QuickJS, on 4 cores with the two-file flights model:
@@ -113,8 +113,8 @@ The quick way builds only the extension, not DuckDB, and downloads the
 official DuckDB CLI of the matching version to load it into:
 
 ```sh
-git clone --recurse-submodules https://github.com/lloydtabb/malloy-duckkdb
-cd malloy-duckkdb
+git clone --recurse-submodules https://github.com/lloydtabb/malloy-duckdb
+cd malloy-duckdb
 scripts/quick-build.sh
 build/duckdb-cli/duckdb -unsigned
 ```
@@ -124,14 +124,14 @@ LOAD 'build/release/extension/malloy/malloy.duckdb_extension';
 ```
 
 On macOS, give `LOAD` an absolute path, e.g.
-`LOAD '/path/to/malloy-duckkdb/build/release/extension/malloy/malloy.duckdb_extension';`.
+`LOAD '/path/to/malloy-duckdb/build/release/extension/malloy/malloy.duckdb_extension';`.
 The official CLI is a hardened binary, and macOS refuses to `dlopen` a
 relative path from one ("relative path not allowed in hardened program").
 `scripts/quick-build.sh` prints the absolute path to use.
 
 `-unsigned` is needed because the build isn't signed by DuckDB. The
 extension only loads into the exact DuckDB version it was built against
-(v1.5.6, the `duckdb` submodule).
+(v2.0.0, the `duckdb` submodule).
 
 To run the SQL tests against that CLI, without a full build:
 

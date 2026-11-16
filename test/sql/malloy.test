@@ -437,11 +437,12 @@ SELECT count(*) FROM flights;
 ----
 3
 
-# With the override turned off, Malloy statements explain how to turn it on
+# With the override turned off, a Malloy statement is an error. Which one
+# depends on the SQL parser: DuckDB's own parser can accept the text as SQL,
+# so the extension is never asked and cannot point at the setting.
 statement ok
 SET allow_parser_override_extension = 'default';
 
 statement error
 run: flights -> by_carrier
 ----
-allow_parser_override_extension
