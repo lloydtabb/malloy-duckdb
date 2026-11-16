@@ -135,7 +135,7 @@ static unique_ptr<TableRef> MalloyBindReplace(ClientContext &context, TableFunct
 	auto query = StringArgument(input, "malloy", "the Malloy query");
 	auto sql = MalloyEngine::ToSQL(context, SessionModel(context, query), query);
 
-	Parser parser(context.GetParserOptions());
+	Parser parser(context);
 	parser.ParseQuery(sql);
 	if (parser.statements.size() != 1 || parser.statements[0]->type != StatementType::SELECT_STATEMENT) {
 		throw BinderException("malloy: the generated SQL is not a single SELECT statement:\n%s", sql);
@@ -197,16 +197,19 @@ static void MalloyRowsScan(ClientContext &, TableFunctionInput &data, DataChunk 
 	output.SetCardinality(count);
 }
 
-static unique_ptr<MalloyRowsData> Columns(vector<LogicalType> &return_types, vector<string> &names,
+static unique_ptr<MalloyRowsData> Columns(vector<LogicalType> &return_types, vector<Identifier> &names,
                                           vector<string> columns) {
-	names = std::move(columns);
+	names.clear();
+	for (auto &column : columns) {
+		names.emplace_back(column);
+	}
 	return_types.assign(names.size(), LogicalType::VARCHAR);
 	return make_uniq<MalloyRowsData>();
 }
 
 #define MALLOY_BIND(NAME)                                                                                              \
 	static unique_ptr<FunctionData> NAME(ClientContext &context, TableFunctionBindInput &input,                       \
-	                                     vector<LogicalType> &return_types, vector<string> &names)
+	                                     vector<LogicalType> &return_types, vector<Identifier> &names)
 
 //===--------------------------------------------------------------------===//
 // malloy (help)
@@ -298,7 +301,7 @@ static string DefinedSummary(const string &verb, const vector<vector<string>> &d
 }
 
 static unique_ptr<FunctionData> DefineBind(ClientContext &context, const string &statements, const string &verb,
-                                           vector<LogicalType> &return_types, vector<string> &names) {
+                                           vector<LogicalType> &return_types, vector<Identifier> &names) {
 	auto state = GetMalloyState(context);
 	auto prefix = InstalledImports(context, *state, statements);
 	auto defined = MalloyEngine::Define(context, state->url, prefix, state->Text(), statements);
@@ -687,12 +690,20 @@ static ParserOverrideResult MalloyParserOverride(ParserExtensionInfo *, const st
 //! With the override turned off, DuckDB only offers statements it failed to
 //! parse, already split at every semicolon, including those inside Malloy's
 //! braces. That cannot be parsed reliably, so explain how to turn it on.
-static ParserExtensionParseResult MalloyParse(ParserExtensionInfo *, const string &query) {
-	if (MalloyRewriteScript(query).empty()) {
-		return ParserExtensionParseResult();
+static ParserExtensionParseResult MalloyParse(ParserExtensionInfo *, const vector<SimpleToken> &tokens) {
+	// The tokens' text, enough to tell Malloy from SQL; the override reads the query itself.
+	vector<string> words;
+	for (auto &token : tokens) {
+		words.push_back(token.text);
 	}
-	return ParserExtensionParseResult(
+	ParserExtensionParseResult result;
+	if (MalloyRewriteScript(StringUtil::Join(words, " ")).empty()) {
+		return result;
+	}
+	result = ParserExtensionParseResult(
 	    "Malloy statements need the parser override: SET allow_parser_override_extension = 'fallback';");
+	result.consumed_tokens = -1;
+	return result;
 }
 
 static ParserExtensionPlanResult MalloyPlan(ParserExtensionInfo *, ClientContext &,

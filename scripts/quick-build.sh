@@ -24,7 +24,8 @@ if [ ! -f build/release/build.ninja ]; then
 fi
 ninja -C build/release malloy_loadable_extension
 
-if [ ! -x build/duckdb-cli/duckdb ]; then
+# Download again when the duckdb submodule moves to another release.
+if [ ! -x build/duckdb-cli/duckdb ] || [ "$(cat build/duckdb-cli/VERSION 2>/dev/null)" != "$VERSION" ]; then
   case "$(uname -s)-$(uname -m)" in
     Linux-x86_64) ASSET=duckdb_cli-linux-amd64.zip ;;
     Linux-aarch64) ASSET=duckdb_cli-linux-arm64.zip ;;
@@ -35,6 +36,7 @@ if [ ! -x build/duckdb-cli/duckdb ]; then
   curl -sSfL -o build/duckdb-cli/cli.zip "https://github.com/duckdb/duckdb/releases/download/$VERSION/$ASSET"
   unzip -oq build/duckdb-cli/cli.zip -d build/duckdb-cli
   rm build/duckdb-cli/cli.zip
+  echo "$VERSION" > build/duckdb-cli/VERSION
 fi
 echo
 echo "Built build/release/extension/malloy/malloy.duckdb_extension for DuckDB $VERSION. Try:"

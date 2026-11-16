@@ -41,7 +41,8 @@ script = ['.mode list', '.headers off', ".separator '\t'", '.bail off', '.nullva
 for n, (kind, sql, _) in enumerate(records):
     script.append(f'.print ###{n}')
     script.append(sql.rstrip().rstrip(';') + ';')
-out = subprocess.run(f"'{cli}' -unsigned 2>&1", shell=True, input='\n'.join(script) + '\n',
+# -no-agent: the CLI prints errors as JSON when it detects an AI agent.
+out = subprocess.run(f"'{cli}' -unsigned -no-agent 2>&1", shell=True, input='\n'.join(script) + '\n',
                      capture_output=True, text=True, cwd=root).stdout
 segments = re.split(r'^###(\d+)$', out, flags=re.M)
 results = {int(segments[i]): segments[i + 1].strip('\n') for i in range(1, len(segments), 2)}
