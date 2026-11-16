@@ -37,8 +37,8 @@
   const DESCRIBE = /^DESCRIBE SELECT \* FROM ([\s\S]*)$/;
   const connectionHost = {
     // Names the database for Malloy's persist manifests, which this
-    // extension doesn't use; every database answers to the same digest.
-    digest: 'malloy-duckdb',
+    // extension doesn't use; every database answers to the same id.
+    databaseId: 'malloy-duckdb',
     query(sql) {
       const m = DESCRIBE.exec(sql.trim());
       if (!m) throw new Error(`malloy-duckdb runs no SQL while compiling: ${sql}`);
