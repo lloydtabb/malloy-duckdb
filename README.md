@@ -60,10 +60,11 @@ malloyyo's `list_sources` and `describe_source` do.
   one settles.
 - **Caching.** Models compiled for queries and for adding to the session
   are kept between statements by Malloy's `CacheManager`. A file's cache
-  key is what it says (for an installed model, the digest `malloy install`
-  wrote; otherwise its text) plus the schemas of the tables its model
-  reads, bound again in the calling connection. So a reinstalled model,
-  `CREATE OR REPLACE TABLE` (on a table read by any file the model
+  key is what it says: for an installed model, the digest `malloy install`
+  wrote; otherwise its text. Beside each cached model the extension keeps
+  the schemas its compile described, and reuses the model only while each
+  is unchanged, bound again in the calling connection. So a reinstalled
+  model, `CREATE OR REPLACE TABLE` (on a table read by any file the model
   imports), or another connection's temporary table means a recompile.
   `malloy sources`, `malloy describe` and `malloy install` always compile
   afresh.
@@ -73,11 +74,12 @@ malloyyo's `list_sources` and `describe_source` do.
 - **The session model.** Each connection keeps the statements it has
   imported and defined, and compiles queries against them. A query that
   names an installed source also gets an `import` of that source's model,
-  so only the models a query uses are compiled.
-- **Installed models** are rows in `malloy.files`, `malloy.sources` and
-  `malloy.tables` (`src/malloy_store.cpp`), read and written through a
-  second connection to the same database. Install also writes each file's
-  digest and the tables the model reads: the model's cache keys.
+  so only the models a query uses are compiled. A view defined with
+  `malloy()` is a database object, so its Malloy sees installed sources but
+  not the session's statements.
+- **Installed models** are rows in `malloy.files` and `malloy.sources`
+  (`src/malloy_store.cpp`), read and written through a second connection to
+  the same database. Install also writes each file's digest, its cache key.
 
 ## Status
 
@@ -95,6 +97,8 @@ Known gaps:
 
 - The session model belongs to one connection and ends with it.
 - Not yet tried with MotherDuck beyond a simple query.
+- Installed models in a database whose name is not a plain identifier
+  (`ATTACH ... AS "My Db"`) are not found.
 - An error in a Malloy statement is reported with the SQL it was rewritten
   into (`LINE 1: SELECT * FROM malloy(...)`), not the text you typed.
 - A Malloy statement in the same script as the `LOAD malloy` before it
@@ -143,13 +147,14 @@ GEN=ninja make release
 make test
 ```
 
-To pick up a newer Malloy or malloyyo, rebuild the bundle from built
-checkouts of both (Malloy: `npm run build`; malloyyo: `npm run gen -w
-packages/mcp-engine`):
+To pick up a newer Malloy or malloyyo, rebuild the bundle and the help
+topics from built checkouts of both (Malloy: `npm run build`; malloyyo:
+`npm run gen -w packages/mcp-engine`), then build the extension again:
 
 ```sh
 (cd bundle && npm install)
 node bundle/build.mjs /path/to/malloy /path/to/malloyyo
+scripts/update-help.py /path/to/malloyyo
 ```
 
 ## Layout
@@ -158,7 +163,7 @@ node bundle/build.mjs /path/to/malloy /path/to/malloyyo
 |---|---|
 | `src/malloy_extension.cpp` | Table functions, the session model, registration |
 | `src/malloy_statements.cpp` | Recognizing and rewriting Malloy statements and `%{ }%` |
-| `src/malloy_store.cpp` | Installed models and their cache keys: the `malloy.files`, `malloy.sources` and `malloy.tables` tables |
+| `src/malloy_store.cpp` | Installed models and their cache keys: the `malloy.files` and `malloy.sources` tables |
 | `src/malloy_engine.cpp` | QuickJS runtime, and the files and schemas the driver asks for |
 | `js/driver.js` | The Malloy host: Runtime, model cache, and the extension's commands |
 | `js/malloy-embedded.js` | Malloy and malloyyo's engine core as one script (generated; see `js/BUNDLE_SOURCE`) |

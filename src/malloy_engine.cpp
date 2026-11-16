@@ -36,6 +36,10 @@ constexpr size_t MALLOY_JS_STACK_SIZE = 4 * 1024 * 1024;
 // starts a call inside another.
 constexpr int MAX_DEPTH = 8;
 
+//! Calls into the runtime in progress on this thread, outermost first: a call
+//! can start inside another, when binding a view defined with malloy().
+thread_local int call_depth = 0;
+
 const char *PRELUDE_JS = "globalThis.console = {log() {}, info() {}, warn() {}, error() {}, debug() {}};";
 
 //! Per-call context handed to the host callbacks through the JSContext opaque.
@@ -206,11 +210,7 @@ JSValue HostModelKeys(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv
 		for (idx_t i = 0; i < keys.files.size(); i++) {
 			json += (i ? "," : "") + JSONString(keys.files[i].first) + ":" + JSONString(keys.files[i].second);
 		}
-		json += "},\"tables\":[";
-		for (idx_t i = 0; i < keys.tables.size(); i++) {
-			json += (i ? "," : "") + JSONString(keys.tables[i]);
-		}
-		json += "]}";
+		json += "}}";
 		return JS_NewStringLen(ctx, json.c_str(), json.size());
 	} catch (std::exception &ex) {
 		return ThrowToJS(ctx, ex);
@@ -253,19 +253,26 @@ public:
 		// A call can start inside another: describing a view defined with
 		// malloy() runs Malloy again. A view whose Malloy reads itself would
 		// recurse until the stack overflowed.
-		if (depth >= idx_t(MAX_DEPTH)) {
-			throw BinderException("Malloy: statements nest more than %d deep; is a view defined with malloy() "
-			                      "reading itself through the session model?",
+		if (call_depth >= MAX_DEPTH) {
+			throw BinderException("Malloy: statements nest more than %d deep; does a view defined with malloy() "
+			                      "read itself?",
 			                      MAX_DEPTH);
 		}
-		depth++;
+		// QuickJS measures its stack limit from here, so only the outermost
+		// call sets it; a nested call runs deeper on the same stack.
+		if (call_depth == 0) {
+			JS_UpdateStackTop(rt);
+		}
+		call_depth++;
+		// When the call ends, however it ends, the driver gives the caller's
+		// state back (malloyDuckDBEnd) and the depth drops.
 		struct Leave {
-			idx_t &depth;
+			Runtime &runtime;
 			~Leave() {
-				depth--;
+				runtime.EndCall(call_depth);
+				call_depth--;
 			}
-		} leave {depth};
-		JS_UpdateStackTop(rt);
+		} leave {*this};
 		HostCall call {context};
 		auto previous = JS_GetContextOpaque(ctx);
 		JS_SetContextOpaque(ctx, &call);
@@ -294,7 +301,9 @@ public:
 		JS_SetContextOpaque(ctx, previous);
 
 		if (JS_IsException(result)) {
-			throw BinderException("Malloy: %s", TakeException());
+			// A nested call's error arrives already marked as Malloy's.
+			auto message = TakeException();
+			throw BinderException(StringUtil::StartsWith(message, "Malloy: ") ? message : "Malloy: " + message);
 		}
 		string out;
 		try {
@@ -310,7 +319,19 @@ public:
 	std::recursive_mutex lock;
 
 private:
-	idx_t depth = 0;
+	//! Calls malloyDuckDBEnd(depth). Never throws: it runs as a call unwinds.
+	void EndCall(int depth) {
+		JSValue global = JS_GetGlobalObject(ctx);
+		JSValue fn = JS_GetPropertyStr(ctx, global, "malloyDuckDBEnd");
+		JSValue arg = JS_NewInt32(ctx, depth);
+		JSValue result = JS_Call(ctx, fn, global, 1, &arg);
+		if (JS_IsException(result)) {
+			JS_FreeValue(ctx, JS_GetException(ctx));
+		}
+		JS_FreeValue(ctx, result);
+		JS_FreeValue(ctx, fn);
+		JS_FreeValue(ctx, global);
+	}
 
 	//! Runs pending jobs until `promise` settles; returns its value, or
 	//! JS_EXCEPTION with the rejection pending. Takes ownership of `promise`.
@@ -476,6 +497,10 @@ vector<vector<string>> MalloyEngine::HelpTopic(const string &query) {
 	auto &rt = GetRuntime();
 	std::lock_guard<std::recursive_mutex> guard(rt.lock);
 	return ParseListing(rt.Call(optional_ptr<ClientContext>(), "helpTopic", {query}));
+}
+
+bool MalloyEngine::Nested() {
+	return call_depth > 0;
 }
 
 string MalloyEngine::MalloyVersion() {

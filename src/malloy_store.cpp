@@ -110,7 +110,6 @@ void CreateTables(Connection &con, const string &catalog) {
 	             " (model VARCHAR, path VARCHAR, contents VARCHAR, installed_from VARCHAR, installed_at TIMESTAMP,"
 	             " digest VARCHAR)");
 	Run(con, "CREATE TABLE IF NOT EXISTS " + Table(catalog, "sources") + " (name VARCHAR, kind VARCHAR, model VARCHAR)");
-	Run(con, "CREATE TABLE IF NOT EXISTS " + Table(catalog, "tables") + " (model VARCHAR, sql_from VARCHAR)");
 }
 
 //! (catalog, model, path) of a FileURL.
@@ -130,7 +129,6 @@ bool HasTables(Connection &con, const string &catalog) {
 
 void DeleteModelFilesIfUnused(Connection &con, const string &catalog, const string &model) {
 	auto unused = " WHERE model = ? AND NOT EXISTS (SELECT 1 FROM " + Table(catalog, "sources") + " WHERE model = ?)";
-	Execute(con, "DELETE FROM " + Table(catalog, "tables") + unused, Value(model), Value(model));
 	Execute(con, "DELETE FROM " + Table(catalog, "files") + unused, Value(model), Value(model));
 }
 
@@ -177,18 +175,10 @@ InstalledKeys MalloyStore::Keys(ClientContext &context, const string &url) {
 	auto address = Address(url);
 	InstalledKeys keys;
 	Connection con(*context.db);
-	// One query: this runs on every compile against an installed model.
-	auto result = Execute(con,
-	                      "SELECT 'file', path, digest FROM " + Table(address.catalog, "files") +
-	                          " WHERE model = ? UNION ALL SELECT 'table', sql_from, NULL FROM " +
-	                          Table(address.catalog, "tables") + " WHERE model = ?",
-	                      Value(address.model), Value(address.model));
+	auto result = Execute(con, "SELECT path, digest FROM " + Table(address.catalog, "files") + " WHERE model = ?",
+	                      Value(address.model));
 	for (auto &row : Rows(*result)) {
-		if (row[0] == "file") {
-			keys.files.emplace_back(FileURL(address.catalog, address.model, row[1]), row[2]);
-		} else {
-			keys.tables.push_back(row[1]);
-		}
+		keys.files.emplace_back(FileURL(address.catalog, address.model, row[0]), row[1]);
 	}
 	return keys;
 }
@@ -228,7 +218,6 @@ void MalloyStore::Install(ClientContext &context, const string &catalog, const I
 		}
 		Execute(con, "DELETE FROM " + Table(catalog, "sources") + " WHERE model = ?", Value(plan.model));
 		Execute(con, "DELETE FROM " + Table(catalog, "files") + " WHERE model = ?", Value(plan.model));
-		Execute(con, "DELETE FROM " + Table(catalog, "tables") + " WHERE model = ?", Value(plan.model));
 		for (auto &file : plan.files) {
 			Execute(con,
 			        "INSERT INTO " + Table(catalog, "files") +
@@ -236,10 +225,6 @@ void MalloyStore::Install(ClientContext &context, const string &catalog, const I
 			            " VALUES (?, ?, ?, ?, now()::TIMESTAMP, md5(?))",
 			        Value(plan.model), Value(file.path), Value(file.contents), Value(file.installed_from),
 			        Value(file.contents));
-		}
-		for (auto &table : plan.tables) {
-			Execute(con, "INSERT INTO " + Table(catalog, "tables") + " VALUES (?, ?)", Value(plan.model),
-			        Value(table));
 		}
 		for (auto &entry : plan.entries) {
 			Execute(con, "INSERT INTO " + Table(catalog, "sources") + " VALUES (?, ?, ?)", Value(entry.second),
@@ -290,7 +275,6 @@ vector<string> MalloyStore::UninstallModel(ClientContext &context, const string 
 	try {
 		Execute(con, "DELETE FROM " + Table(catalog, "sources") + " WHERE model = ?", Value(name));
 		Execute(con, "DELETE FROM " + Table(catalog, "files") + " WHERE model = ?", Value(name));
-		Execute(con, "DELETE FROM " + Table(catalog, "tables") + " WHERE model = ?", Value(name));
 		Run(con, "COMMIT");
 	} catch (...) {
 		con.Query("ROLLBACK");

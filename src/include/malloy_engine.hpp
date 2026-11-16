@@ -62,6 +62,10 @@ public:
 
 	//! The Malloy version the bundle was built from.
 	static string MalloyVersion();
+
+	//! True while this thread is inside a call to the compiler: a statement
+	//! being compiled is binding a view defined with malloy().
+	static bool Nested();
 };
 
 //! Turns what a user typed for a model location into a URL the compiler can

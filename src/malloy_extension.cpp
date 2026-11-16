@@ -98,11 +98,23 @@ static string InstalledImports(ClientContext &context, const MalloyClientState &
 
 //! The model a query compiles against: the installed sources it needs, then
 //! the session's statements.
+//!
+//! Except inside another compile: a view defined with malloy() is compiled
+//! whenever a statement that reads it is bound. A view is a database object,
+//! so its Malloy sees installed sources only. With the session's statements
+//! it would mean something different in each connection, and a session
+//! source that reads the view would compile itself.
 static MalloyModel SessionModel(ClientContext &context, const string &text) {
 	auto state = GetMalloyState(context);
 	MalloyModel model;
 	model.url = state->url;
 	model.in_memory = true;
+	if (MalloyEngine::Nested()) {
+		MalloyClientState none;
+		none.url = state->url;
+		model.text = InstalledImports(context, none, text);
+		return model;
+	}
 	auto prefix = InstalledImports(context, *state, text);
 	auto session = state->Text();
 	model.text = prefix.empty() ? session : session.empty() ? prefix : prefix + "\n" + session;
@@ -454,8 +466,6 @@ static InstallPlan PlanInstall(ClientContext &context, const string &url, vector
 			plan.entries.emplace_back(row[1], row[2]);
 		} else if (row[0] == "warning" && row.size() >= 2) {
 			warnings.push_back(row[1]);
-		} else if (row[0] == "table" && row.size() >= 2) {
-			plan.tables.push_back(row[1]);
 		}
 	}
 	if (files.empty()) {

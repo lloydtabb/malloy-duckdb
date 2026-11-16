@@ -24,28 +24,22 @@ struct InstallPlan {
 	string model;
 	vector<InstallFile> files;
 	vector<pair<string, string>> entries; // (kind, name)
-	//! The tables and SQL sources the model's compile described, as the
-	//! `<from>` of `DESCRIBE SELECT * FROM <from>`.
-	vector<string> tables;
 };
 
 //! What a compiled installed model depends on, as install recorded it.
 struct InstalledKeys {
 	//! FileURL -> the md5 of its contents, for every file of the model.
 	vector<pair<string, string>> files;
-	//! The tables and SQL sources its compile described.
-	vector<string> tables;
 };
 
-//! Installed models live in three tables in a `malloy` schema of a database:
+//! Installed models live in two tables in a `malloy` schema of a database:
 //!
 //!   malloy.files   (model, path, contents, installed_from, installed_at, digest)
 //!   malloy.sources (name, kind, model)
-//!   malloy.tables  (model, sql_from)
 //!
-//! `digest` (the md5 of `contents`) and `malloy.tables` are the cache keys
-//! install writes: a compiled model is reused while its files' digests and
-//! the schemas of its tables are unchanged.
+//! `digest` (the md5 of `contents`) is the cache key install writes: a
+//! compiled model is reused while its files' digests, and the schemas of the
+//! tables its compile described, are unchanged.
 //!
 //! Each model's files are stored under the model's own name, so imports
 //! between them resolve as they did on disk. The tables are read and written
