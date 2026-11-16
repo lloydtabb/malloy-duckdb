@@ -9,6 +9,9 @@ Catalog Error
 
 require malloy
 
+# malloy_compile() returns JSON; the tests read it with json_extract_string
+require json
+
 statement ok
 CREATE TABLE flights AS
 SELECT * FROM (VALUES ('AA', 'JFK', 100), ('AA', 'LAX', 200), ('UA', 'JFK', 300)) AS t(carrier, origin, distance);
@@ -40,7 +43,7 @@ AA	2
 UA	1
 
 query I
-SELECT malloy_version IS NOT NULL FROM malloy_version();
+SELECT regexp_matches(malloy_version, '^[0-9]+\.[0-9]+\.[0-9]+') FROM malloy_version();
 ----
 true
 
@@ -152,33 +155,29 @@ malloy import 'test/models/movies.malloy';
 imported 1 source (movies)
 
 query IIII
-SELECT name, kind, type, grain FROM malloy_describe('movies');
+SELECT name, kind, type, fans_out FROM malloy_describe('movies');
 ----
-title	dimension	string	(empty)
-movie_count	measure	number	(empty)
-genres	dimension	string[]	(empty)
-directors	dimension	{name :: string, born :: number}[]	(empty)
-by_genre	view	view	(empty)
-by_genre_each	view	view	(empty)
-by_director	view	view	(empty)
-genres.each	dimension	string	genres
-directors.name	dimension	string	directors
-directors.born	dimension	number	directors
+title	dimension	string	false
+movie_count	measure	number	false
+by_genre	view	view	false
+by_genre_each	view	view	false
+by_director	view	view	false
+genres	array	array	true
+genres.each	dimension	string	true
+directors	array	array	true
+directors.name	dimension	string	true
+directors.born	dimension	number	true
 
-query II
-SELECT definition, example FROM malloy_describe('movies') WHERE name = 'movie_count';
-----
-count()	aggregate: movie_count
-
-# malloy describe: compact, one line per field, grouped
 query I
-SELECT line FROM malloy_describe_text('movies') WHERE line IN ('source movies', 'measures:', '  movie_count = count()', 'joins and nested data:', '    each :: string');
+SELECT expression FROM malloy_describe('movies') WHERE name = 'movie_count';
 ----
-source movies
-measures:
-  movie_count = count()
-joins and nested data:
-    each :: string
+count()
+
+# malloy describe: malloyyo's describe_source answer, the JSON then the source's Malloy
+query I
+SELECT count(*) FROM malloy_describe_text('movies') WHERE line IN ('  "source": "movies",', 'source: movies is duckdb.table(''movies'') extend {');
+----
+2
 
 # malloy compile: a query's result metadata, as JSON
 query II
@@ -217,6 +216,62 @@ statement error
 malloy describe nope;
 ----
 named 'nope'
+
+# A cached model is reused only while the tables of every file it read are
+# unchanged, imported files included. The model is compiled and cached first,
+# and the import is cached on its own: adding `other` recompiles the session
+# model but takes outer.malloy from the cache.
+statement ok
+CREATE TABLE imported_t AS SELECT 1 AS x;
+
+query I
+malloy import 'test/models/imports/outer.malloy';
+----
+imported 1 source (outer_src)
+
+query I
+run: outer_src -> { select: * };
+----
+1
+
+query I
+source: other is duckdb.table('flights');
+----
+defined 1 source (other)
+
+query I
+run: outer_src -> { select: * };
+----
+1
+
+statement ok
+CREATE OR REPLACE TABLE imported_t AS SELECT 1 AS x, 2 AS y;
+
+query II
+run: outer_src -> { select: * };
+----
+1	2
+
+# A model can read a view defined with malloy()
+statement ok
+CREATE VIEW malloy_view AS SELECT * FROM %{ duckdb.table('flights') -> { select: carrier } }%;
+
+query II
+malloy check 'test/models/views/over_view.malloy';
+----
+over_view	source
+
+# A view's Malloy sees installed sources, not the session's: a session
+# source can read the view without the view's Malloy compiling the session
+query I
+source: over_view_too is duckdb.table('malloy_view');
+----
+defined 1 source (over_view_too)
+
+query I
+run: over_view_too -> { aggregate: n is count() };
+----
+3
 
 statement ok
 malloy reset;
@@ -257,15 +312,15 @@ top_carriers	query	memory: airline/airline.malloy
 query III
 SELECT description, primary_key, joins FROM malloy_sources() WHERE name = 'airline_flights';
 ----
-Flights, one row per flight	(empty)	carrier_names (one)
+Flights, one row per flight	(empty)	carrier_names (many_to_one)
 
 query IIII
-SELECT name, kind, description, example FROM malloy_describe('airline_flights') WHERE name LIKE 'carrier_names%';
+SELECT name, kind, description, expression FROM malloy_describe('airline_flights') WHERE name LIKE 'carrier_names%';
 ----
-carrier_names	join	Carrier names, one row per carrier code	group_by: carrier_names.code
-carrier_names.code	dimension	(empty)	group_by: carrier_names.code; aggregate: n is count(carrier_names.code)
-carrier_names.nickname	dimension	(empty)	group_by: carrier_names.nickname; aggregate: n is count(carrier_names.nickname)
-carrier_names.shouted	dimension	The carrier's name in capitals	group_by: carrier_names.shouted; aggregate: n is count(carrier_names.shouted)
+carrier_names	join	Carrier names, one row per carrier code	join_one: carrier_names with carrier
+carrier_names.code	dimension	(empty)	(empty)
+carrier_names.nickname	dimension	(empty)	(empty)
+carrier_names.shouted	dimension	The carrier's name in capitals	upper(nickname)
 
 query II
 run: airline_flights -> by_carrier + { order_by: nickname };
@@ -289,6 +344,15 @@ query I
 run: aa_flights -> { aggregate: flight_count };
 ----
 2
+
+# A cached model is reused only while its tables are unchanged
+statement ok
+CREATE OR REPLACE TABLE flights AS SELECT *, 1 AS extra FROM flights;
+
+query II
+run: airline_flights -> { group_by: extra; aggregate: flight_count };
+----
+1	3
 
 statement ok
 malloy reset;

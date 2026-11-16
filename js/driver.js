@@ -1,12 +1,15 @@
-// Runs inside QuickJS, after malloy-embedded.js. It drives the Malloy
-// compiler's needs loop, asking the C++ side (globalThis.__malloyHost) for
-// whatever the compiler needs:
+// Runs inside QuickJS, after malloy-embedded.js. It is a
+// Malloy host: one long-lived Runtime, asking the C++ side
+// (globalThis.__malloyHost) for files and table schemas:
 //
 //   __malloyHost.readURL(url)      -> the file's text
 //   __malloyHost.describe(sqlFrom) -> JSON: [[column_name, duckdb_type], ...]
 //                                     for `SELECT * FROM <sqlFrom>`
+//   __malloyHost.modelKeys(url)    -> JSON: {files: {url: md5}}, the digests
+//                                     install wrote for the installed model
+//                                     `url` belongs to
 //
-// Both throw on failure.
+// Each throws on failure.
 //
 // Every entry point on globalThis.malloyDuckDB compiles against a model,
 // named by `modelURL`. If `modelText` is a string, it is that model's source
@@ -20,94 +23,243 @@
 (function () {
   'use strict';
   const host = globalThis.__malloyHost;
-  const malloy = globalThis.malloyEmbedded;
+  const {malloy, duckdb, engine} = globalThis.malloyEmbedded;
   const CONNECTION = 'duckdb';
 
-  // DuckDB column types become Malloy types exactly as Malloy's own DuckDB
-  // connection converts them, nested STRUCT and LIST types included.
-  function schemaFor(sqlFrom) {
-    return JSON.parse(malloy.duckdbSchema(host.describe(sqlFrom)));
+  // What one compile touched, for the model cache and for `collect`.
+  let recording = null; // {files: Map<url, contents>, tables: Map<from, describeJSON>}
+  let inMemory = new Map(); // url -> model text the C++ side holds in memory
+
+  // The connection: everything Malloy does with DuckDB (DESCRIBE, the type
+  // mapping) is DuckDBCommon's. The only SQL Malloy sends while compiling is
+  // `DESCRIBE SELECT * FROM <x>`, which the host answers by binding <x> in
+  // the caller's own connection and transaction.
+  const DESCRIBE = /^DESCRIBE SELECT \* FROM ([\s\S]*)$/;
+  const connectionHost = {
+    // Names the database for Malloy's persist manifests, which this
+    // extension doesn't use; every database answers to the same id.
+    databaseId: 'malloy-duckdb',
+    query(sql) {
+      const m = DESCRIBE.exec(sql.trim());
+      if (!m) throw new Error(`malloy-duckdb runs no SQL while compiling: ${sql}`);
+      const json = host.describe(m[1]);
+      if (recording) recording.tables.set(m[1], json);
+      return JSON.parse(json).map(([column_name, column_type]) => ({column_name, column_type}));
+    },
+  };
+  const connection = new duckdb.DuckDBHostConnection(CONNECTION, connectionHost);
+
+  // Install wrote a digest of each installed file (malloy.files.digest).
+  // Digests are fetched once per call to the driver, one host round trip per
+  // model, as are table schemas; both are dropped when the call ends, so
+  // every call sees the database as it is.
+  const STORE_SCHEME = 'malloy-installed://';
+  let storeKeys = new Map(); // FileURL -> {files: {url: md5}}
+  let schemas = new Map(); // from -> DESCRIBE JSON, or a marker if it fails
+  function forgetCallState() {
+    storeKeys = new Map();
+    schemas = new Map();
+  }
+  function installedKeys(url) {
+    let keys = storeKeys.get(url);
+    if (!keys) {
+      keys = JSON.parse(host.modelKeys(url));
+      storeKeys.set(url, keys);
+      for (const file of Object.keys(keys.files)) storeKeys.set(file, keys);
+    }
+    return keys;
+  }
+  function schemaOf(from) {
+    if (!schemas.has(from)) {
+      let json;
+      try {
+        json = host.describe(from);
+      } catch (e) {
+        json = `(cannot describe: ${e.message})`;
+      }
+      schemas.set(from, json);
+    }
+    return schemas.get(from);
+  }
+
+  // A file's invalidation key for Malloy's CacheManager: what the file says,
+  // as install's digest or else its text. CacheManager reuses a cached model
+  // only while the key of every file it read is unchanged.
+  function invalidationKey(url, contents) {
+    if (inMemory.has(url)) return inMemory.get(url);
+    if (url.startsWith(STORE_SCHEME)) return installedKeys(url).files[url];
+    return contents ?? host.readURL(url);
+  }
+
+  const urlReader = {
+    async readURL(url) {
+      const u = url.toString();
+      const contents = inMemory.has(u) ? inMemory.get(u) : host.readURL(u);
+      if (recording && !inMemory.has(u)) recording.files.set(u, contents);
+      return {contents, invalidationKey: invalidationKey(u, contents)};
+    },
+    async getInvalidationKey(url) {
+      return invalidationKey(url.toString());
+    },
+  };
+
+  // A cached model also depends on its tables: CREATE OR REPLACE TABLE, or
+  // a temporary table that hides one, changes what the model means. So the
+  // cache keeps, beside each model, the schemas its compile described, and
+  // serves the model only while every one of them is unchanged in the
+  // caller's connection. An import served from the cache adds its schemas to
+  // the compile in progress, so the importing model depends on them too.
+  const models = new malloy.InMemoryModelCache();
+  const modelSchemas = new Map(); // url -> Map<from, describeJSON>
+  const modelCache = {
+    async getModel(url) {
+      const schemasThen = modelSchemas.get(url.toString());
+      if (!schemasThen) return undefined;
+      for (const [from, json] of schemasThen) {
+        if (schemaOf(from) !== json) return undefined;
+      }
+      const cached = await models.getModel(url);
+      if (cached && recording) {
+        for (const [from, json] of schemasThen) recording.tables.set(from, json);
+      }
+      return cached;
+    },
+    async setModel(url, cached) {
+      if (!recording) return false;
+      modelSchemas.set(url.toString(), new Map(recording.tables));
+      return models.setModel(url, cached);
+    },
+  };
+
+  const runtime = new malloy.Runtime({
+    connection,
+    urlReader,
+    cacheManager: new malloy.CacheManager(modelCache),
+  });
+
+  // Every compile describes its tables again, in the caller's context, so
+  // that what it records is current. `refreshSchemaCache` takes a time; an
+  // increasing one refreshes even two compiles in the same millisecond.
+  let lastRefresh = 0;
+  function refresh() {
+    lastRefresh = Math.max(lastRefresh + 1, Date.now());
+    return {refreshSchemaCache: lastRefresh};
+  }
+
+  // Runs `fn` with `modelText` (if any) serving `modelURL`.
+  async function withModel(modelURL, modelText, fn) {
+    const saved = inMemory;
+    inMemory = new Map(saved);
+    if (typeof modelText === 'string') inMemory.set(modelURL, modelText);
+    try {
+      return await fn();
+    } finally {
+      inMemory = saved;
+    }
+  }
+
+  // The compiled model at `modelURL`, from the cache while its files and
+  // tables are unchanged.
+  async function loadModel(modelURL, modelText) {
+    const materializer = runtime.loadModel(new URL(modelURL), refresh());
+    recording = {files: new Map(), tables: new Map()};
+    try {
+      await withModel(modelURL, modelText, () => materializer.getModel());
+    } catch (e) {
+      fail(e);
+    } finally {
+      recording = null;
+    }
+    return materializer;
   }
 
   // How a compile error says where it is. `session` describes the session
   // model, so errors in it can point at the statement being added.
-  function where(log, session) {
-    const url = log.url || '';
-    const line = log.range ? log.range.start.line + 1 : 0;
-    const col = log.range ? log.range.start.character + 1 : 0;
-    if (url.startsWith('internal://query/')) {
-      return line ? `query line ${line}, column ${col}` : 'query';
-    }
-    if (session && url === session.url) {
-      if (line > session.newFromLine) {
-        return `line ${line - session.newFromLine}, column ${col}`;
-      }
-      return line ? `session model line ${line}` : 'session model';
+  function where(problem) {
+    const url = (problem.at && problem.at.url) || '';
+    const start = problem.at && problem.at.range ? problem.at.range.start : undefined;
+    const line = start ? start.line + 1 : 0;
+    const col = start ? start.character + 1 : 0;
+    if (url.startsWith('internal://')) {
+      // A query, or a statement being added to the session (extendModel).
+      return line ? `line ${line}, column ${col}` : 'query';
     }
     return line ? `${url}:${line}:${col}` : url;
   }
 
-  function fail(logs, session) {
-    const errors = logs.filter(l => l.severity === 'error');
-    throw new Error(errors.map(e => `${e.message} (${where(e, session)})`).join('\n'));
+  function fail(e) {
+    const problems = e && Array.isArray(e.problems) ? e.problems.filter(p => p.severity === 'error') : [];
+    if (!problems.length) throw e instanceof Error ? e : new Error(String(e));
+    throw new Error(problems.map(p => `${p.message} (${where(p)})`).join('\n'));
   }
 
-  // Runs one compile to completion. `compile` is a malloyEmbedded function.
-  // `observe`, if given, is told of every file read ({url, contents}) and
-  // every table described ({table}).
-  function drive(compile, request, modelText, session, observe) {
-    const needs = {
-      connections: [{name: CONNECTION, dialect: 'duckdb'}],
-      files: [],
-      table_schemas: [],
-      sql_schemas: [],
-    };
-    for (let round = 0; round < 100; round++) {
-      const response = JSON.parse(compile(JSON.stringify({...request, compiler_needs: needs})));
-      const logs = response.logs || [];
-      if (logs.some(l => l.severity === 'error')) fail(logs, session);
-      const asked = response.compiler_needs;
-      if (!asked) return response;
-      let progress = false;
-      for (const file of asked.files || []) {
-        const inMemory = typeof modelText === 'string' && file.url === request.model_url;
-        const text = inMemory ? modelText : host.readURL(file.url);
-        if (observe && !inMemory) observe({url: file.url, contents: text});
-        needs.files.push({url: file.url, contents: text});
-        progress = true;
-      }
-      for (const table of asked.table_schemas || []) {
-        if (observe) observe({table: table.name});
-        needs.table_schemas.push({...table, schema: schemaFor(table.name)});
-        progress = true;
-      }
-      for (const sql of asked.sql_schemas || []) {
-        needs.sql_schemas.push({...sql, schema: schemaFor(`(${sql.sql})`)});
-        progress = true;
-      }
-      for (const c of asked.connections || []) {
-        if (!needs.connections.some(k => k.name === c.name)) {
-          throw new Error(`Unknown connection '${c.name}'; inside DuckDB the only connection is '${CONNECTION}'`);
-        }
-      }
-      if (!progress) {
-        throw new Error('Malloy compiler asked for something malloy-duckdb cannot supply: ' + JSON.stringify(asked));
-      }
+  async function prepared(modelURL, queryText, modelText) {
+    const model = await loadModel(modelURL, modelText);
+    try {
+      return await withModel(modelURL, modelText, () => model.loadQuery(queryText, refresh()).getPreparedResult());
+    } catch (e) {
+      fail(e);
     }
-    throw new Error('Malloy compile did not finish');
   }
 
-  // Every source and named query the model can see, described: see
-  // compileModelCatalog in malloy-embedded's catalog.ts.
-  function catalog(modelURL, modelText) {
-    const response = drive(malloy.compileModelCatalog, {model_url: modelURL}, modelText);
-    return (response.catalog && response.catalog.entries) || [];
+  // malloyyo's MCP engine answers `malloy sources` and `malloy describe`, as
+  // its list_sources and describe_source do, through this host. Each call
+  // gets its own connection: the engine compiles through the Runtime it is
+  // handed, and a fresh schema cache describes every table in the caller's
+  // current context.
+  function engineHost(modelURL, modelText) {
+    // Called inside withModel, so modelText is in inMemory already.
+    const readSource = href => (inMemory.has(href) ? inMemory.get(href) : host.readURL(href));
+    return {
+      withModel: (ref, fn) =>
+        withModel(modelURL, modelText, () =>
+          fn({
+            runtime: new malloy.Runtime({
+              connection: new duckdb.DuckDBHostConnection(CONNECTION, connectionHost),
+              urlReader: runtime.urlReader,
+            }),
+            entry: new URL(modelURL),
+            readSource,
+          })
+        ),
+    };
   }
 
-  // Everything the model can see: sources and named queries, imports included.
-  function contents(modelURL, modelText, session) {
-    const response = drive(malloy.compileModelContents, {model_url: modelURL}, modelText, session);
-    return (response.model && response.model.entries) || [];
+  // The engine's tool, called as an MCP client would call it.
+  async function engineTool(name, modelURL, modelText, args) {
+    const tool = engine.exploreSurface(engineHost(modelURL, modelText)).tools.find(t => t.name === name);
+    const result = await tool.handler({...args, model_ref: modelURL});
+    if (!result.ok) {
+      const errors = (result.problems || []).filter(p => p.severity !== 'warning');
+      throw new Error(errors.map(p => p.message).join('\n') || `${name} failed`);
+    }
+    return result;
+  }
+
+  // The model as the engine compiles it: sources and named queries.
+  async function engineModel(modelURL, modelText) {
+    return engineHost(modelURL, modelText).withModel(modelURL, async m => {
+      const compiled = await engine.compile(m.runtime, m.entry, {readSource: m.readSource});
+      if (!compiled.ok) fail({problems: compiled.problems.map(p => ({...p, severity: p.severity ?? 'error'}))});
+      return compiled.model;
+    });
+  }
+
+  // A describe_source type as one line: a scalar's name, or a record's fields.
+  function typeText(type) {
+    if (typeof type === 'string') return type;
+    if (type && typeof type === 'object') {
+      return `{${Object.entries(type).map(([n, d]) => `${n} :: ${d.type === undefined ? 'array' : typeText(d.type)}`).join(', ')}}`;
+    }
+    return '';
+  }
+
+  // Everything a model can see: sources and named queries, imports included.
+  function contentsOf(model) {
+    return [
+      ...model.explores.map(e => ({kind: 'source', name: e.name})),
+      ...model.queries().named.map(name => ({kind: 'query', name})),
+    ];
   }
 
   // A table path naming a file relative to the working directory, such as
@@ -128,62 +280,35 @@
     return rows.map(row => row.map(cell).join('\t')).join('\n');
   }
 
-  // ── help topics: malloyyo's yo_help topics (js/help-content.js) ─────────
-  // Ported from malloyyo packages/mcp-engine/src/help.ts, so topic names and
-  // lookup match yo_help: a topic's name is its path, and the language
-  // reference is split on its `## ` headings into language/<heading>.
-  const LANGUAGE_REFERENCE = 'language/malloy-language-reference.md';
-
-  function slugify(text) {
-    return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  }
-
-  function stripHeader(raw) {
-    const text = raw.replace(/^<!--[\s\S]*?-->\s*\n/, '');
-    const m = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(text);
-    if (!m) return {description: '', body: text};
-    const d = /^description:\s*(.+)$/m.exec(m[1]);
-    return {description: d ? d[1].trim() : '', body: m[2]};
-  }
-
+  // ── help topics: the engine core's Malloy topics ─────────────────────────
+  // The same topics, names and text as malloyyo's yo_help: the language
+  // reference (language/<section>) and the query examples. The core's other
+  // explore/ topics are about MCP tools. Tool names in the text become the
+  // extension's commands.
+  const RENAMES = [
+    [/`describe_source`/g, '`malloy describe`'],
+    [/describe_source/g, 'malloy describe'],
+    [/`list_sources`/g, '`malloy sources`'],
+    [/list_sources/g, 'malloy sources'],
+  ];
   let helpTopics = null;
   function topics() {
     if (helpTopics) return helpTopics;
-    helpTopics = [];
-    const files = globalThis.malloyHelpContent || {};
-    for (const key of Object.keys(files)) {
-      const name = key.replace(/\.md$/, '').split('/').map(slugify).join('/');
-      if (key !== LANGUAGE_REFERENCE) {
-        const {description, body} = stripHeader(files[key]);
-        helpTopics.push({name, description, body: body.trim()});
-        continue;
-      }
-      // Split the reference into sections; the preamble is language/overview.
-      let section = 'language/overview';
-      let title = 'Malloy language reference: overview';
-      let lines = [];
-      const flush = () => {
-        const body = lines.join('\n').trim();
-        if (body) helpTopics.push({name: section, description: title, body});
-        lines = [];
-      };
-      for (const line of stripHeader(files[key]).body.split('\n')) {
-        const m = /^## (?!# )(.+)$/.exec(line);
-        if (m) {
-          flush();
-          section = 'language/' + slugify(m[1].trim());
-          title = m[1].trim();
-          continue;
-        }
-        lines.push(line);
-      }
-      flush();
-    }
+    helpTopics = engine
+      .listHelpTopics()
+      .filter(name => name.startsWith('language/') || name === 'explore/query-examples')
+      .map(name => {
+        const body = RENAMES.reduce((text, [from, to]) => text.replace(from, to), engine.getHelpTopic(name).body);
+        // What it is about: its first sentence, or its heading.
+        const first = (body.split('\n').find(line => line.trim()) || '').replace(/^#+\s*/, '').trim();
+        const about = first.replace(/^(.*?\.)\s.*$/, '$1');
+        return {name, about, body};
+      });
     return helpTopics;
   }
 
-  // Exact name, then a name containing it (`joins` finds language/joins),
-  // then a topic whose text contains every word.
+  // As yo_help finds one: exact name, then a name containing it (`joins`
+  // finds language/joins), then a topic whose text contains every word.
   function findTopic(query) {
     const q = query.toLowerCase().trim();
     const all = topics();
@@ -196,7 +321,7 @@
   globalThis.malloyDuckDB = {
     // Rows of topic, about: every help topic.
     helpTopics() {
-      return listing(topics().map(t => [t.name, t.description]));
+      return listing(topics().map(t => [t.name, t.about]));
     },
 
     // Rows of one line each: the topic's text, its name first.
@@ -210,162 +335,84 @@
 
 
     getVersion() {
-      return malloy.version;
+      return globalThis.malloyEmbedded.version;
     },
 
     // Malloy query text -> DuckDB SQL.
-    toSQL(modelURL, queryText, modelText) {
-      const response = drive(malloy.compileQuery, {model_url: modelURL, query_malloy: queryText}, modelText);
-      if (!response.result || typeof response.result.sql !== 'string') {
-        throw new Error('Malloy produced no SQL for this query');
-      }
-      return response.result.sql;
+    async toSQL(modelURL, queryText, modelText) {
+      return (await prepared(modelURL, queryText, modelText)).sql;
     },
 
-    // Rows of kind, name, description, primary_key, filters, joins, fields:
-    // every source and named query the model can see.
-    listSources(modelURL, modelText) {
-      return listing(
-        catalog(modelURL, modelText).map(e => {
-          const joins = e.fields
-            .filter(f => f.kind === 'join' && !f.path.includes('.'))
-            .map(f => `${f.path} (${f.type.replace(/^join_/, '')})`);
-          const own = e.fields.filter(f => !f.path.includes('.') && f.kind !== 'join');
-          const count = kind => own.filter(f => f.kind === kind).length;
-          const counts = [
-            [count('dimension'), 'dimension'],
-            [count('measure'), 'measure'],
-            [count('calculation'), 'calculation'],
-            [count('view'), 'view'],
-          ]
-            .filter(([n]) => n > 0)
-            .map(([n, word]) => `${n} ${word}${n === 1 ? '' : 's'}`);
-          return [
-            e.kind,
-            e.name,
-            e.description || '',
-            e.primary_key || '',
-            e.filters.join('; '),
-            joins.join(', '),
-            counts.join(', '),
-          ];
-        })
-      );
+    // Rows of kind, name, description, primary_key, joins, fields: every
+    // source and named query the model can see, as the engine compiles it.
+    async listSources(modelURL, modelText) {
+      const model = await engineModel(modelURL, modelText);
+      const counts = groups =>
+        [
+          [groups.dimensions.length, 'dimension'],
+          [groups.measures.length, 'measure'],
+          [groups.views.length, 'view'],
+        ]
+          .filter(([n]) => n > 0)
+          .map(([n, word]) => `${n} ${word}${n === 1 ? '' : 's'}`)
+          .join(', ');
+      return listing([
+        ...Object.values(model.sources).map(s => [
+          'source',
+          s.name,
+          s.description || '',
+          s.primary_key || '',
+          s.joins.map(j => `${j.name} (${j.relationship})`).join(', '),
+          counts(s),
+        ]),
+        ...model.queries.map(q => ['query', q.name, q.description || '', '', '', '']),
+      ]);
     },
 
-    // Rows of path, kind, type, grain, description, definition, usage,
-    // example: every field of one source or named query, through its joins
-    // and nested data.
-    describe(modelURL, name, modelText) {
-      const entries = catalog(modelURL, modelText);
-      const entry = entries.find(e => e.name === name);
-      if (!entry) {
-        const known = entries.map(e => e.name).sort().join(', ');
-        throw new Error(`No source or query named '${name}'` + (known ? `; defined: ${known}` : '; nothing is defined yet'));
-      }
-      return listing(
-        entry.fields.map(f => [
-          f.path,
-          f.kind,
-          f.type,
-          f.grain,
-          f.description || '',
-          (f.annotations || []).join(' '),
-          f.definition || '',
-          f.usage,
-          (f.examples || []).join('; '),
-        ])
-      );
-    },
-
-    // One row per line: a source or named query, compactly. Its own fields
-    // grouped by kind, then each join and nested array with its fields.
-    describeText(modelURL, name, modelText) {
-      const entries = catalog(modelURL, modelText);
-      const entry = entries.find(e => e.name === name);
-      if (!entry) {
-        const known = entries.map(e => e.name).sort().join(', ');
-        throw new Error(`No source or query named '${name}'` + (known ? `; defined: ${known}` : '; nothing is defined yet'));
-      }
-      // One-line annotations go on the field's line; a multi-line one (a
-      // block like #|(agent) ... |#) goes on the lines after it, indented.
-      const oneLine = text => !text.includes('\n');
-      const notes = f => {
-        const parts = [];
-        if (f.description) parts.push(`-- ${f.description}`);
-        for (const a of f.annotations || []) if (oneLine(a)) parts.push(a);
-        return parts.length ? '  ' + parts.join('  ') : '';
-      };
-      const blocks = (f, pad) =>
-        (f.annotations || [])
-          .filter(a => !oneLine(a))
-          .map(a => a.split('\n').map(l => `${pad}  ${l}`).join('\n'));
-      const line = f => {
-        const name = f.path.includes('.') ? f.path.slice(f.path.lastIndexOf('.') + 1) : f.path;
-        let text = name;
-        if (f.kind === 'dimension' || f.kind === 'calculation') text += ` :: ${f.type}`;
-        if (f.definition) text += ` = ${f.definition.replace(/\s+/g, ' ')}`;
-        return text + notes(f);
-      };
-      const lines = [];
-      lines.push(`${entry.kind} ${entry.name}${entry.description ? ' -- ' + entry.description : ''}`);
-      for (const a of entry.annotations || []) {
-        for (const l of a.split('\n')) lines.push(`  ${l}`);
-      }
-      if (entry.primary_key) lines.push(`  primary_key: ${entry.primary_key}`);
-      for (const f of entry.filters || []) lines.push(`  where: ${f}`);
-      for (const p of entry.parameters || []) lines.push(`  parameter: ${p}`);
-
-      const own = entry.fields.filter(f => !f.path.includes('.'));
-      const sections = entry.kind === 'query'
-        ? [['columns', own]]
-        : [
-            ['dimensions', own.filter(f => f.kind === 'dimension')],
-            ['measures', own.filter(f => f.kind === 'measure')],
-            ['calculations', own.filter(f => f.kind === 'calculation')],
-            ['views', own.filter(f => f.kind === 'view')],
-          ];
-      for (const [title, fields] of sections) {
-        if (!fields.length) continue;
-        lines.push(`${title}:`);
-        for (const f of fields) lines.push(`  ${line(f)}`, ...blocks(f, '  '));
-      }
-
-      // Joins and nested arrays as a tree: each with its fields, then the
-      // joins and arrays inside it.
-      const isNested = f => f.kind === 'join' || /\[\]$/.test(f.type);
-      const parentOf = path => (path.includes('.') ? path.slice(0, path.lastIndexOf('.')) : '');
-      const nested = entry.fields.filter(isNested);
-      const emit = (parent, depth) => {
-        for (const n of nested.filter(f => parentOf(f.path) === parent)) {
-          const pad = '  '.repeat(depth);
-          const kind = n.kind === 'join' ? n.type : `${n.type} (nested)`;
-          const example = (n.examples || [])[0];
-          lines.push(`${pad}${n.path} :: ${kind}${notes(n)}${example ? `  e.g. ${example}` : ''}`, ...blocks(n, pad));
-          for (const f of entry.fields) {
-            if (parentOf(f.path) !== n.path || isNested(f)) continue;
-            lines.push(`${pad}  ${line(f)}`, ...blocks(f, pad + '  '));
-          }
-          emit(n.path, depth + 1);
+    // Rows of name, kind, type, fans_out, description, instructions,
+    // expression: describe_source's answer, one row per field, join and view.
+    async describe(modelURL, name, modelText) {
+      const r = await engineTool('describe_source', modelURL, modelText, {source: name});
+      const rows = [];
+      const fields = (schema, prefix, fans) => {
+        for (const [n, d] of Object.entries(schema.dimensions || {})) {
+          if (d.type === undefined) continue; // an array: its joins entry describes it
+          rows.push([prefix + n, 'dimension', typeText(d.type), fans, d.description || '', d.instructions || '', d.expression || '']);
+        }
+        for (const [n, d] of Object.entries(schema.measures || {})) {
+          rows.push([prefix + n, 'measure', typeText(d.type), fans, d.description || '', d.instructions || '', d.expression || '']);
         }
       };
-      if (nested.length) {
-        lines.push('joins and nested data:');
-        emit('', 1);
+      const root = r.described_source;
+      fields(root, '', 'false');
+      for (const [n, description] of Object.entries(root.views || {})) {
+        rows.push([n, 'view', 'view', 'false', description || '', '', '']);
       }
-      return listing(lines.map(l => [l]));
+      for (const [path, j] of Object.entries(r.joins || {})) {
+        const schema = j.source_def || (j.source && r.join_source_map[j.source]) || {};
+        const fans = j.fans_out ? 'true' : 'false';
+        rows.push([j.quoted_path || path, j.is_array ? 'array' : 'join', j.is_array ? 'array' : j.source || '', fans, schema.description || '', schema.instructions || '', j.code || '']);
+        fields(schema, `${j.quoted_path || path}.`, fans);
+      }
+      return listing(rows);
+    },
+
+    // describe_source's answer as an MCP client receives it, one row per
+    // line: the JSON, then the source's Malloy text.
+    async describeText(modelURL, name, modelText) {
+      // Without `guidance`: it tells an MCP client how to use the query tool and
+      // share links, which have no counterpart inside DuckDB.
+      const {guidance, ...r} = await engineTool('describe_source', modelURL, modelText, {source: name});
+      const blocks = engine.toContent(r).content.map(c => c.text);
+      return listing(blocks.join('\n\n').split('\n').map(line => [line]));
     },
 
     // A query's result metadata, as JSON, without running it: its SQL, its
     // output schema (nested fields included, each with its annotations), and
     // the query's, source's and model's annotations. Malloy's own Result
     // shape, without the data.
-    compile(modelURL, queryText, modelText) {
-      const response = drive(malloy.compileQuery, {model_url: modelURL, query_malloy: queryText}, modelText);
-      if (!response.result) {
-        throw new Error('Malloy produced no result for this query');
-      }
-      const {data, ...result} = response.result;
+    async compile(modelURL, queryText, modelText) {
+      const {data, ...result} = (await prepared(modelURL, queryText, modelText)).toStableResult();
       return JSON.stringify(result);
     },
 
@@ -374,13 +421,20 @@
     // what it makes newly visible. The session model is `prefix` (imports of
     // installed sources it needs) followed by `sessionText`. Changes nothing:
     // the caller appends `newText` to its session model.
-    define(modelURL, prefix, sessionText, newText) {
-      const join = parts => parts.filter(p => p).join('\n');
-      const before = new Set(contents(modelURL, join([prefix, sessionText])).map(e => `${e.kind}\t${e.name}`));
-      const lines = text => (text ? text.split('\n').length : 0);
-      const session = {url: modelURL, newFromLine: lines(prefix) + lines(sessionText)};
-      const after = contents(modelURL, join([prefix, sessionText, newText]), session);
-      return listing(after.filter(e => !before.has(`${e.kind}\t${e.name}`)).map(e => [e.kind, e.name]));
+    async define(modelURL, prefix, sessionText, newText) {
+      const text = [prefix, sessionText].filter(p => p).join('\n');
+      const before = await loadModel(modelURL, text);
+      const known = new Set(contentsOf(await before.getModel()).map(e => `${e.kind}\t${e.name}`));
+      // The new statements compile against the session model as it is; error
+      // positions are relative to `newText` itself.
+      const after = before.extendModel(newText, {importBaseURL: new URL(modelURL), ...refresh()});
+      let afterModel;
+      try {
+        afterModel = await withModel(modelURL, text, () => after.getModel());
+      } catch (e) {
+        fail(e);
+      }
+      return listing(contentsOf(afterModel).filter(e => !known.has(`${e.kind}\t${e.name}`)).map(e => [e.kind, e.name]));
     },
 
     // Compiles the model file at `modelURL` and lists, one row each:
@@ -388,23 +442,53 @@
     //   entry   <kind> <name>      every source and named query it exports
     //   warning <message>          a source reading a file by a relative path
     // For `malloy install` and `malloy check`.
-    collect(modelURL) {
-      const files = [];
-      const warnings = [];
-      const response = drive(malloy.compileModel, {model_url: modelURL}, undefined, undefined, seen => {
-        if (seen.url !== undefined) {
-          files.push(['file', seen.url, seen.contents]);
-        } else if (looksLikeRelativeFile(seen.table)) {
-          warnings.push(['warning', `reads the file ${seen.table} by a relative path, which only works where DuckDB runs in the same directory; for a shared database, load it into a table or use an absolute, s3:// or https:// location`]);
-        }
-      });
-      const translation = (response.translations || []).find(t => t.url === modelURL);
-      const modelDef = translation ? JSON.parse(translation.compiled_model_json) : {contents: {}};
-      const entries = ((response.model && response.model.entries) || []).map(e => {
-        const def = modelDef.contents[e.name];
-        return ['entry', def && def.type === 'query' ? 'query' : e.kind, e.name];
+    async collect(modelURL) {
+      // Always a fresh compile, without the cache: install stores every file
+      // the compile reads.
+      const seen = (recording = {files: new Map(), tables: new Map()});
+      let modelDef;
+      try {
+        const fresh = new malloy.Runtime({
+          connection: new duckdb.DuckDBHostConnection(CONNECTION, connectionHost),
+          urlReader,
+        });
+        modelDef = (await fresh.loadModel(new URL(modelURL)).getModel())._modelDef;
+      } catch (e) {
+        fail(e);
+      } finally {
+        recording = null;
+      }
+      const files = [...seen.files].map(([url, contents]) => ['file', url, contents]);
+      const warnings = [...seen.tables.keys()]
+        .filter(looksLikeRelativeFile)
+        .map(table => ['warning', `reads the file ${table} by a relative path, which only works where DuckDB runs in the same directory; for a shared database, load it into a table or use an absolute, s3:// or https:// location`]);
+      const entries = (modelDef.exports || []).map(name => {
+        const def = modelDef.contents[name];
+        return ['entry', def && def.type === 'query' ? 'query' : 'source', name];
       });
       return listing([...files, ...entries, ...warnings]);
     },
+  };
+
+  // Each call sees the database as it is: install's digests and table
+  // schemas are fetched afresh for it. A call can start inside another:
+  // describing a view defined with malloy() runs Malloy again. So each call
+  // keeps its own state, and when it ends, settled or not, the C++ side
+  // calls malloyDuckDBEnd(depth) to give the caller's state back.
+  const callers = []; // the state of each call in progress, outermost first
+  for (const [name, fn] of Object.entries(globalThis.malloyDuckDB)) {
+    globalThis.malloyDuckDB[name] = (...args) => {
+      callers.push({recording, inMemory, storeKeys, schemas});
+      forgetCallState();
+      recording = null;
+      inMemory = new Map();
+      return fn(...args);
+    };
+  }
+  // Ends the call at `depth` (1 for the outermost) and any inside it.
+  globalThis.malloyDuckDBEnd = depth => {
+    if (callers.length < depth) return;
+    ({recording, inMemory, storeKeys, schemas} = callers[depth - 1]);
+    callers.length = depth - 1;
   };
 })();

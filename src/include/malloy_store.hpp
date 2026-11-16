@@ -26,10 +26,20 @@ struct InstallPlan {
 	vector<pair<string, string>> entries; // (kind, name)
 };
 
+//! What a compiled installed model depends on, as install recorded it.
+struct InstalledKeys {
+	//! FileURL -> the md5 of its contents, for every file of the model.
+	vector<pair<string, string>> files;
+};
+
 //! Installed models live in two tables in a `malloy` schema of a database:
 //!
-//!   malloy.files   (model, path, contents, installed_from, installed_at)
+//!   malloy.files   (model, path, contents, installed_from, installed_at, digest)
 //!   malloy.sources (name, kind, model)
+//!
+//! `digest` (the md5 of `contents`) is the cache key install writes: a
+//! compiled model is reused while its files' digests, and the schemas of the
+//! tables its compile described, are unchanged.
 //!
 //! Each model's files are stored under the model's own name, so imports
 //! between them resolve as they did on disk. The tables are read and written
@@ -67,6 +77,10 @@ public:
 
 	//! Removes one source; its model's files go too if it was the last one.
 	static void UninstallSource(ClientContext &context, const string &catalog, const string &name);
+
+	//! The cache keys install wrote for the model that `url` (a FileURL)
+	//! belongs to.
+	static InstalledKeys Keys(ClientContext &context, const string &url);
 
 	//! Every installed file in `catalog`: (model, path, contents).
 	static vector<vector<string>> Files(ClientContext &context, const string &catalog);

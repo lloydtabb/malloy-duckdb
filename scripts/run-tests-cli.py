@@ -25,7 +25,9 @@ for block in open(test).read().split('\n\n'):
         continue
     head = lines[0].split()
     if head[0] == 'require':
-        records.append(('setup', f"LOAD '{ext}';", None))
+        # The CLI has DuckDB's own extensions (json) built in.
+        load = f"LOAD '{ext}';" if head[1] == 'malloy' else f"LOAD {head[1]};"
+        records.append(('setup', load, None))
         continue
     body = lines[1:]
     if '----' in body:

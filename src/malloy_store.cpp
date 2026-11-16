@@ -107,9 +107,17 @@ string Decode(const string &text) {
 void CreateTables(Connection &con, const string &catalog) {
 	Run(con, "CREATE SCHEMA IF NOT EXISTS " + Ident(catalog) + ".malloy");
 	Run(con, "CREATE TABLE IF NOT EXISTS " + Table(catalog, "files") +
-	             " (model VARCHAR, path VARCHAR, contents VARCHAR, installed_from VARCHAR, installed_at TIMESTAMP)");
+	             " (model VARCHAR, path VARCHAR, contents VARCHAR, installed_from VARCHAR, installed_at TIMESTAMP,"
+	             " digest VARCHAR)");
 	Run(con, "CREATE TABLE IF NOT EXISTS " + Table(catalog, "sources") + " (name VARCHAR, kind VARCHAR, model VARCHAR)");
 }
+
+//! (catalog, model, path) of a FileURL.
+struct FileAddress {
+	string catalog;
+	string model;
+	string path;
+};
 
 bool HasTables(Connection &con, const string &catalog) {
 	auto result = Execute(con,
@@ -120,10 +128,8 @@ bool HasTables(Connection &con, const string &catalog) {
 }
 
 void DeleteModelFilesIfUnused(Connection &con, const string &catalog, const string &model) {
-	Execute(con,
-	        "DELETE FROM " + Table(catalog, "files") + " WHERE model = ? AND NOT EXISTS (SELECT 1 FROM " +
-	            Table(catalog, "sources") + " WHERE model = ?)",
-	        Value(model), Value(model));
+	auto unused = " WHERE model = ? AND NOT EXISTS (SELECT 1 FROM " + Table(catalog, "sources") + " WHERE model = ?)";
+	Execute(con, "DELETE FROM " + Table(catalog, "files") + unused, Value(model), Value(model));
 }
 
 } // namespace
@@ -155,16 +161,33 @@ bool MalloyStore::IsFileURL(const string &url) {
 	return StringUtil::StartsWith(url, FILE_SCHEME);
 }
 
-string MalloyStore::ReadFile(ClientContext &context, const string &url) {
+static FileAddress Address(const string &url) {
 	auto rest = url.substr(strlen(FILE_SCHEME));
 	auto first = rest.find('/');
 	auto second = first == string::npos ? string::npos : rest.find('/', first + 1);
 	if (second == string::npos) {
 		throw IOException("malloy: not an installed model file: %s", url);
 	}
-	auto catalog = Decode(rest.substr(0, first));
-	auto model = Decode(rest.substr(first + 1, second - first - 1));
-	auto path = rest.substr(second + 1);
+	return {Decode(rest.substr(0, first)), Decode(rest.substr(first + 1, second - first - 1)), rest.substr(second + 1)};
+}
+
+InstalledKeys MalloyStore::Keys(ClientContext &context, const string &url) {
+	auto address = Address(url);
+	InstalledKeys keys;
+	Connection con(*context.db);
+	auto result = Execute(con, "SELECT path, digest FROM " + Table(address.catalog, "files") + " WHERE model = ?",
+	                      Value(address.model));
+	for (auto &row : Rows(*result)) {
+		keys.files.emplace_back(FileURL(address.catalog, address.model, row[0]), row[1]);
+	}
+	return keys;
+}
+
+string MalloyStore::ReadFile(ClientContext &context, const string &url) {
+	auto address = Address(url);
+	auto &catalog = address.catalog;
+	auto &model = address.model;
+	auto &path = address.path;
 
 	Connection con(*context.db);
 	if (!HasTables(con, catalog)) {
@@ -196,8 +219,12 @@ void MalloyStore::Install(ClientContext &context, const string &catalog, const I
 		Execute(con, "DELETE FROM " + Table(catalog, "sources") + " WHERE model = ?", Value(plan.model));
 		Execute(con, "DELETE FROM " + Table(catalog, "files") + " WHERE model = ?", Value(plan.model));
 		for (auto &file : plan.files) {
-			Execute(con, "INSERT INTO " + Table(catalog, "files") + " VALUES (?, ?, ?, ?, now()::TIMESTAMP)",
-			        Value(plan.model), Value(file.path), Value(file.contents), Value(file.installed_from));
+			Execute(con,
+			        "INSERT INTO " + Table(catalog, "files") +
+			            " (model, path, contents, installed_from, installed_at, digest)"
+			            " VALUES (?, ?, ?, ?, now()::TIMESTAMP, md5(?))",
+			        Value(plan.model), Value(file.path), Value(file.contents), Value(file.installed_from),
+			        Value(file.contents));
 		}
 		for (auto &entry : plan.entries) {
 			Execute(con, "INSERT INTO " + Table(catalog, "sources") + " VALUES (?, ?, ?)", Value(entry.second),

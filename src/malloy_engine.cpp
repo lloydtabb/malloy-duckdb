@@ -20,8 +20,6 @@ extern const unsigned char MALLOY_EMBEDDED_JS[];
 extern const size_t MALLOY_EMBEDDED_JS_LEN;
 extern const unsigned char MALLOY_DRIVER_JS[];
 extern const size_t MALLOY_DRIVER_JS_LEN;
-extern const unsigned char MALLOY_HELP_JS[];
-extern const size_t MALLOY_HELP_JS_LEN;
 
 namespace duckdb {
 
@@ -31,6 +29,14 @@ namespace {
 // top recorded by JS_UpdateStackTop, which is refreshed before every call
 // because DuckDB may bind on any thread.
 constexpr size_t MALLOY_JS_STACK_SIZE = 4 * 1024 * 1024;
+
+// How deep Malloy calls may nest: describing a view defined with malloy()
+// starts a call inside another.
+constexpr int MAX_DEPTH = 8;
+
+//! Calls into the runtime in progress on this thread, outermost first: a call
+//! can start inside another, when binding a view defined with malloy().
+thread_local int call_depth = 0;
 
 const char *PRELUDE_JS = "globalThis.console = {log() {}, info() {}, warn() {}, error() {}, debug() {}};";
 
@@ -189,6 +195,26 @@ JSValue HostDescribe(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv)
 	}
 }
 
+//! The cache keys install wrote for an installed model, as JSON:
+//! {"files": {"<url>": "<md5>", ...}, "tables": ["<from>", ...]}.
+JSValue HostModelKeys(JSContext *ctx, JSValueConst, int argc, JSValueConst *argv) {
+	auto call = static_cast<HostCall *>(JS_GetContextOpaque(ctx));
+	try {
+		if (!call || !call->context || argc < 1) {
+			throw InternalException("malloy: modelKeys called outside a compile");
+		}
+		auto keys = MalloyStore::Keys(*call->context, JSStringArg(ctx, argv[0]));
+		string json = "{\"files\":{";
+		for (idx_t i = 0; i < keys.files.size(); i++) {
+			json += (i ? "," : "") + JSONString(keys.files[i].first) + ":" + JSONString(keys.files[i].second);
+		}
+		json += "}}";
+		return JS_NewStringLen(ctx, json.c_str(), json.size());
+	} catch (std::exception &ex) {
+		return ThrowToJS(ctx, ex);
+	}
+}
+
 class Runtime {
 public:
 	Runtime() {
@@ -207,11 +233,11 @@ public:
 		JSValue host = JS_NewObject(ctx);
 		JS_SetPropertyStr(ctx, host, "readURL", JS_NewCFunction(ctx, HostReadURL, "readURL", 1));
 		JS_SetPropertyStr(ctx, host, "describe", JS_NewCFunction(ctx, HostDescribe, "describe", 1));
+		JS_SetPropertyStr(ctx, host, "modelKeys", JS_NewCFunction(ctx, HostModelKeys, "modelKeys", 1));
 		JS_SetPropertyStr(ctx, global, "__malloyHost", host);
 		JS_FreeValue(ctx, global);
 
 		Eval(reinterpret_cast<const char *>(MALLOY_EMBEDDED_JS), MALLOY_EMBEDDED_JS_LEN, "malloy-embedded.js");
-		Eval(reinterpret_cast<const char *>(MALLOY_HELP_JS), MALLOY_HELP_JS_LEN, "help-content.js");
 		Eval(reinterpret_cast<const char *>(MALLOY_DRIVER_JS), MALLOY_DRIVER_JS_LEN, "driver.js");
 	}
 
@@ -221,7 +247,29 @@ public:
 	//! Calls malloyDuckDB[method](args...) and returns its string result.
 	//! `context` is what the host callbacks act on; null for calls that need none.
 	string Call(optional_ptr<ClientContext> context, const char *method, const vector<string> &args) {
-		JS_UpdateStackTop(rt);
+		// A call can start inside another: describing a view defined with
+		// malloy() runs Malloy again. A view whose Malloy reads itself would
+		// recurse until the stack overflowed.
+		if (call_depth >= MAX_DEPTH) {
+			throw BinderException("Malloy: statements nest more than %d deep; does a view defined with malloy() "
+			                      "read itself?",
+			                      MAX_DEPTH);
+		}
+		// QuickJS measures its stack limit from here, so only the outermost
+		// call sets it; a nested call runs deeper on the same stack.
+		if (call_depth == 0) {
+			JS_UpdateStackTop(rt);
+		}
+		call_depth++;
+		// When the call ends, however it ends, the driver gives the caller's
+		// state back (malloyDuckDBEnd) and the depth drops.
+		struct Leave {
+			Runtime &runtime;
+			~Leave() {
+				runtime.EndCall(call_depth);
+				call_depth--;
+			}
+		} leave {*this};
 		HostCall call {context};
 		auto previous = JS_GetContextOpaque(ctx);
 		JS_SetContextOpaque(ctx, &call);
@@ -240,10 +288,19 @@ public:
 		JS_FreeValue(ctx, fn);
 		JS_FreeValue(ctx, api);
 		JS_FreeValue(ctx, global);
+
+		// Malloy's Runtime API is asynchronous, but the host callbacks are
+		// synchronous, so the promise settles once the job queue is drained.
+		// The host callbacks still need the context while jobs run.
+		if (!JS_IsException(result) && JS_IsPromise(result)) {
+			result = Settle(result);
+		}
 		JS_SetContextOpaque(ctx, previous);
 
 		if (JS_IsException(result)) {
-			throw BinderException("Malloy: %s", TakeException());
+			// A nested call's error arrives already marked as Malloy's.
+			auto message = TakeException();
+			throw BinderException(StringUtil::StartsWith(message, "Malloy: ") ? message : "Malloy: " + message);
 		}
 		string out;
 		try {
@@ -259,6 +316,46 @@ public:
 	std::recursive_mutex lock;
 
 private:
+	//! Calls malloyDuckDBEnd(depth). Never throws: it runs as a call unwinds.
+	void EndCall(int depth) {
+		JSValue global = JS_GetGlobalObject(ctx);
+		JSValue fn = JS_GetPropertyStr(ctx, global, "malloyDuckDBEnd");
+		JSValue arg = JS_NewInt32(ctx, depth);
+		JSValue result = JS_Call(ctx, fn, global, 1, &arg);
+		if (JS_IsException(result)) {
+			JS_FreeValue(ctx, JS_GetException(ctx));
+		}
+		JS_FreeValue(ctx, result);
+		JS_FreeValue(ctx, fn);
+		JS_FreeValue(ctx, global);
+	}
+
+	//! Runs pending jobs until `promise` settles; returns its value, or
+	//! JS_EXCEPTION with the rejection pending. Takes ownership of `promise`.
+	JSValue Settle(JSValue promise) {
+		while (JS_PromiseState(ctx, promise) == JS_PROMISE_PENDING) {
+			JSContext *job_ctx;
+			int ran = JS_ExecutePendingJob(rt, &job_ctx);
+			if (ran < 0) {
+				// A job threw outside any promise; it may not be this call's.
+				// Drop it and go on: this call's own failure rejects its promise.
+				JS_FreeValue(job_ctx, JS_GetException(job_ctx));
+				continue;
+			}
+			if (ran == 0 && JS_PromiseState(ctx, promise) == JS_PROMISE_PENDING) {
+				JS_FreeValue(ctx, promise);
+				return JS_ThrowInternalError(ctx, "the Malloy call did not finish: it is waiting on asynchronous work the host never runs (a timer or real IO)");
+			}
+		}
+		JSValue value = JS_PromiseResult(ctx, promise);
+		bool rejected = JS_PromiseState(ctx, promise) == JS_PROMISE_REJECTED;
+		JS_FreeValue(ctx, promise);
+		if (rejected) {
+			return JS_Throw(ctx, value);
+		}
+		return value;
+	}
+
 	void Eval(const char *source, size_t len, const char *filename) {
 		JSValue result = JS_Eval(ctx, source, len, filename, JS_EVAL_TYPE_GLOBAL);
 		if (JS_IsException(result)) {
@@ -397,6 +494,10 @@ vector<vector<string>> MalloyEngine::HelpTopic(const string &query) {
 	auto &rt = GetRuntime();
 	std::lock_guard<std::recursive_mutex> guard(rt.lock);
 	return ParseListing(rt.Call(optional_ptr<ClientContext>(), "helpTopic", {query}));
+}
+
+bool MalloyEngine::Nested() {
+	return call_depth > 0;
 }
 
 string MalloyEngine::MalloyVersion() {

@@ -1,0 +1,5 @@
+import 'inner.malloy'
+
+source: outer_src is inner_src extend {
+  measure: row_count is count()
+}

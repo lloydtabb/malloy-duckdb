@@ -98,11 +98,23 @@ static string InstalledImports(ClientContext &context, const MalloyClientState &
 
 //! The model a query compiles against: the installed sources it needs, then
 //! the session's statements.
+//!
+//! Except inside another compile: a view defined with malloy() is compiled
+//! whenever a statement that reads it is bound. A view is a database object,
+//! so its Malloy sees installed sources only. With the session's statements
+//! it would mean something different in each connection, and a session
+//! source that reads the view would compile itself.
 static MalloyModel SessionModel(ClientContext &context, const string &text) {
 	auto state = GetMalloyState(context);
 	MalloyModel model;
 	model.url = state->url;
 	model.in_memory = true;
+	if (MalloyEngine::Nested()) {
+		MalloyClientState none;
+		none.url = state->url;
+		model.text = InstalledImports(context, none, text);
+		return model;
+	}
 	auto prefix = InstalledImports(context, *state, text);
 	auto session = state->Text();
 	model.text = prefix.empty() ? session : session.empty() ? prefix : prefix + "\n" + session;
@@ -226,7 +238,7 @@ MALLOY_BIND(MalloyHelpBind) {
 }
 
 //===--------------------------------------------------------------------===//
-// malloy help [<topic>]: malloyyo's yo_help topics
+// malloy help [<topic>]: the Malloy topics of malloyyo's yo_help, from the engine core
 //===--------------------------------------------------------------------===//
 MALLOY_BIND(MalloyHelpTopicsBind) {
 	auto result = Columns(return_types, names, {"topic", "about"});
@@ -355,7 +367,7 @@ MALLOY_BIND(MalloySourcesBind) {
 		from[entry.first] = "session";
 	}
 	auto result = Columns(return_types, names,
-	                      {"name", "kind", "from", "description", "primary_key", "filters", "joins", "fields"});
+	                      {"name", "kind", "from", "description", "primary_key", "joins", "fields"});
 	if (from.empty()) {
 		return std::move(result);
 	}
@@ -366,10 +378,10 @@ MALLOY_BIND(MalloySourcesBind) {
 	}
 	try {
 		for (auto &row : MalloyEngine::ListSources(context, SessionModel(context, every_name))) {
-			if (row.size() < 7 || !from.count(row[1])) {
+			if (row.size() < 6 || !from.count(row[1])) {
 				continue;
 			}
-			result->rows.push_back({row[1], row[0], from[row[1]], row[2], row[3], row[4], row[5], row[6]});
+			result->rows.push_back({row[1], row[0], from[row[1]], row[2], row[3], row[4], row[5]});
 		}
 	} catch (std::exception &ex) {
 		// Still list what is there, and say why there is no more.
@@ -400,7 +412,7 @@ MALLOY_BIND(MalloyDescribeBind) {
 	if (!known) {
 		throw BinderException("Malloy: no source or query named '%s'; malloy sources lists them", name);
 	}
-	auto result = Columns(return_types, names, {"name", "kind", "type", "grain", "description", "annotations", "definition", "usage", "example"});
+	auto result = Columns(return_types, names, {"name", "kind", "type", "fans_out", "description", "instructions", "expression"});
 	result->rows = MalloyEngine::Describe(context, SessionModel(context, MalloyName(name)), name);
 	return std::move(result);
 }
