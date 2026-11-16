@@ -238,7 +238,7 @@ MALLOY_BIND(MalloyHelpBind) {
 }
 
 //===--------------------------------------------------------------------===//
-// malloy help [<topic>]: malloyyo's yo_help topics
+// malloy help [<topic>]: the Malloy topics of malloyyo's yo_help, from the engine core
 //===--------------------------------------------------------------------===//
 MALLOY_BIND(MalloyHelpTopicsBind) {
 	auto result = Columns(return_types, names, {"topic", "about"});

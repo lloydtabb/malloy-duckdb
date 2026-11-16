@@ -1,4 +1,4 @@
-// Runs inside QuickJS, after malloy-embedded.js and help-content.js. It is a
+// Runs inside QuickJS, after malloy-embedded.js. It is a
 // Malloy host: one long-lived Runtime, asking the C++ side
 // (globalThis.__malloyHost) for files and table schemas:
 //
@@ -280,62 +280,35 @@
     return rows.map(row => row.map(cell).join('\t')).join('\n');
   }
 
-  // ── help topics: malloyyo's yo_help topics (js/help-content.js) ─────────
-  // Ported from malloyyo packages/mcp-engine/src/help.ts, so topic names and
-  // lookup match yo_help: a topic's name is its path, and the language
-  // reference is split on its `## ` headings into language/<heading>.
-  const LANGUAGE_REFERENCE = 'language/malloy-language-reference.md';
-
-  function slugify(text) {
-    return text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-  }
-
-  function stripHeader(raw) {
-    const text = raw.replace(/^<!--[\s\S]*?-->\s*\n/, '');
-    const m = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(text);
-    if (!m) return {description: '', body: text};
-    const d = /^description:\s*(.+)$/m.exec(m[1]);
-    return {description: d ? d[1].trim() : '', body: m[2]};
-  }
-
+  // ── help topics: the engine core's Malloy topics ─────────────────────────
+  // The same topics, names and text as malloyyo's yo_help: the language
+  // reference (language/<section>) and the query examples. The core's other
+  // explore/ topics are about MCP tools. Tool names in the text become the
+  // extension's commands.
+  const RENAMES = [
+    [/`describe_source`/g, '`malloy describe`'],
+    [/describe_source/g, 'malloy describe'],
+    [/`list_sources`/g, '`malloy sources`'],
+    [/list_sources/g, 'malloy sources'],
+  ];
   let helpTopics = null;
   function topics() {
     if (helpTopics) return helpTopics;
-    helpTopics = [];
-    const files = globalThis.malloyHelpContent || {};
-    for (const key of Object.keys(files)) {
-      const name = key.replace(/\.md$/, '').split('/').map(slugify).join('/');
-      if (key !== LANGUAGE_REFERENCE) {
-        const {description, body} = stripHeader(files[key]);
-        helpTopics.push({name, description, body: body.trim()});
-        continue;
-      }
-      // Split the reference into sections; the preamble is language/overview.
-      let section = 'language/overview';
-      let title = 'Malloy language reference: overview';
-      let lines = [];
-      const flush = () => {
-        const body = lines.join('\n').trim();
-        if (body) helpTopics.push({name: section, description: title, body});
-        lines = [];
-      };
-      for (const line of stripHeader(files[key]).body.split('\n')) {
-        const m = /^## (?!# )(.+)$/.exec(line);
-        if (m) {
-          flush();
-          section = 'language/' + slugify(m[1].trim());
-          title = m[1].trim();
-          continue;
-        }
-        lines.push(line);
-      }
-      flush();
-    }
+    helpTopics = engine
+      .listHelpTopics()
+      .filter(name => name.startsWith('language/') || name === 'explore/query-examples')
+      .map(name => {
+        const body = RENAMES.reduce((text, [from, to]) => text.replace(from, to), engine.getHelpTopic(name).body);
+        // What it is about: its first sentence, or its heading.
+        const first = (body.split('\n').find(line => line.trim()) || '').replace(/^#+\s*/, '').trim();
+        const about = first.replace(/^(.*?\.)\s.*$/, '$1');
+        return {name, about, body};
+      });
     return helpTopics;
   }
 
-  // Exact name, then a name containing it (`joins` finds language/joins),
-  // then a topic whose text contains every word.
+  // As yo_help finds one: exact name, then a name containing it (`joins`
+  // finds language/joins), then a topic whose text contains every word.
   function findTopic(query) {
     const q = query.toLowerCase().trim();
     const all = topics();
@@ -348,7 +321,7 @@
   globalThis.malloyDuckDB = {
     // Rows of topic, about: every help topic.
     helpTopics() {
-      return listing(topics().map(t => [t.name, t.description]));
+      return listing(topics().map(t => [t.name, t.about]));
     },
 
     // Rows of one line each: the topic's text, its name first.

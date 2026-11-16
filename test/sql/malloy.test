@@ -9,6 +9,9 @@ Catalog Error
 
 require malloy
 
+# malloy_compile() returns JSON; the tests read it with json_extract_string
+require json
+
 statement ok
 CREATE TABLE flights AS
 SELECT * FROM (VALUES ('AA', 'JFK', 100), ('AA', 'LAX', 200), ('UA', 'JFK', 300)) AS t(carrier, origin, distance);

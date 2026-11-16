@@ -20,8 +20,6 @@ extern const unsigned char MALLOY_EMBEDDED_JS[];
 extern const size_t MALLOY_EMBEDDED_JS_LEN;
 extern const unsigned char MALLOY_DRIVER_JS[];
 extern const size_t MALLOY_DRIVER_JS_LEN;
-extern const unsigned char MALLOY_HELP_JS[];
-extern const size_t MALLOY_HELP_JS_LEN;
 
 namespace duckdb {
 
@@ -240,7 +238,6 @@ public:
 		JS_FreeValue(ctx, global);
 
 		Eval(reinterpret_cast<const char *>(MALLOY_EMBEDDED_JS), MALLOY_EMBEDDED_JS_LEN, "malloy-embedded.js");
-		Eval(reinterpret_cast<const char *>(MALLOY_HELP_JS), MALLOY_HELP_JS_LEN, "help-content.js");
 		Eval(reinterpret_cast<const char *>(MALLOY_DRIVER_JS), MALLOY_DRIVER_JS_LEN, "driver.js");
 	}
 

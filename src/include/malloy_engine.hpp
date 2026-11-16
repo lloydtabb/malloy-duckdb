@@ -54,7 +54,8 @@ public:
 	//! annotations, and the query's, source's and model's annotations.
 	static string Compile(ClientContext &context, const MalloyModel &model, const string &query);
 
-	//! Help topics (malloyyo's yo_help topics): (topic, about) rows.
+	//! Help topics (the Malloy topics of malloyyo's yo_help, from the engine
+	//! core): (topic, about) rows.
 	static vector<vector<string>> HelpTopics();
 	//! One help topic, found by name, part of a name, or words in its text:
 	//! its name, then one row per line.

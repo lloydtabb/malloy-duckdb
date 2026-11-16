@@ -147,14 +147,14 @@ GEN=ninja make release
 make test
 ```
 
-To pick up a newer Malloy or malloyyo, rebuild the bundle and the help
-topics from built checkouts of both (Malloy: `npm run build`; malloyyo:
-`npm run gen -w packages/mcp-engine`), then build the extension again:
+To pick up a newer Malloy or malloyyo, rebuild the bundle from built
+checkouts of both (Malloy: `npm run build`; malloyyo: `npm run gen -w
+packages/mcp-engine`), then build the extension again. The help topics come
+with malloyyo's engine core, in the bundle:
 
 ```sh
 (cd bundle && npm install)
 node bundle/build.mjs /path/to/malloy /path/to/malloyyo
-scripts/update-help.py /path/to/malloyyo
 ```
 
 ## Layout
