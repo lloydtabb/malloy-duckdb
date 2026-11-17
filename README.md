@@ -8,6 +8,7 @@ can query the model's sources.
 > macOS; see [Status](#status).
 
 ```sql
+INSTALL malloy FROM community;
 LOAD malloy;
 
 -- Copy a model, and every file it imports, into this database.
