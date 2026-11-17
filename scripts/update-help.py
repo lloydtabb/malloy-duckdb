@@ -12,11 +12,15 @@ malloyyo's tools are changed to the extension's commands.
 import json, os, subprocess, sys
 
 TOPICS = [
+    # The two to read first come first, so `malloy help` lists them at the top.
+    'explore/query-examples.md',
+    'language/from-sql.md',
     'language/malloy-language-reference.md',  # split on its ## headings
     'language/pick.md',
-    'explore/query-examples.md',
 ]
 RENAMES = [
+    ('reading its generated SQL.',
+     'reading its generated SQL: `malloy sql SELECT * FROM %{ <query> }%;`.'),
     ('`describe_source`', '`malloy describe`'),
     ('describe_source', 'malloy describe'),
     ('`list_sources`', '`malloy sources`'),
